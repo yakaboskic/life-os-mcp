@@ -14,12 +14,15 @@ function response(body: string | Buffer, status = 200, type = "text/html; charse
 }
 function json(body: unknown, status: number): Response { return response(JSON.stringify(body), status, "application/json; charset=utf-8"); }
 function redirect(location: string): Response { return response("", 303, "text/plain", { location }); }
-function brandingDestination(base: string | undefined, path: string): string | undefined {
+function brandingDestination(base: string | undefined, path: string, app: string | undefined): string | undefined {
   if (!base?.trim()) return undefined;
   const url = new URL(base.trim());
   if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) throw new Error("INVALID_BRANDING_URL");
+  const selectedApp = app?.trim();
+  if (selectedApp && !/^[a-z][a-z0-9-]{0,63}$/.test(selectedApp)) throw new Error("INVALID_BRANDING_APP");
   const suffix = path === "/about" ? "" : path;
   url.pathname = url.pathname.replace(/\/+$/, "") + suffix;
+  if (suffix && selectedApp) url.searchParams.set("app", selectedApp);
   return url.href;
 }
 function escape(text: string): string { return text.replace(/[&<>"']/g, (value) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[value]!); }
@@ -47,7 +50,7 @@ export function createWebHandler(dependencies: WebDependencies = {}): (request: 
     if (publicPage !== undefined) {
       if (request.method !== "GET" && request.method !== "HEAD") return response("Method not allowed", 405, "text/plain; charset=utf-8", { allow: "GET, HEAD" });
       try {
-        const destination = brandingDestination(env.LIFE_OS_BRANDING_URL, url.pathname);
+        const destination = brandingDestination(env.LIFE_OS_BRANDING_URL, url.pathname, env.LIFE_OS_BRANDING_APP);
         if (destination) return response("", 308, "text/plain; charset=utf-8", { location: destination });
       } catch { return response("Public information is temporarily unavailable.", 503, "text/plain; charset=utf-8"); }
       return response(request.method === "HEAD" ? "" : publicPage);

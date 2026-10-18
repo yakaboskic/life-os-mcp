@@ -12,6 +12,7 @@ Create the Vercel project with Root Directory `web-app`, Node.js 24, and **Inclu
 | `LIFE_OS_ALLOWED_EMAIL` | Your complete Google account email, for example `owner@example.com` |
 | `LIFE_OS_PUBLIC_URL` | Exact HTTPS production origin, without a path |
 | `LIFE_OS_BRANDING_URL` | Optional public product homepage on your own website, e.g. `https://www.example.com/life-os` |
+| `LIFE_OS_BRANDING_APP` | Optional app identifier for shared policies, e.g. `lifeos` |
 | `LIFE_OS_GATEWAY_URL` | HTTPS Cloud Run gateway origin ending in `.run.app` |
 | `LIFE_OS_GATEWAY_TOKEN` | Random gateway bearer secret with at least 32 bytes |
 
@@ -30,6 +31,8 @@ The app provides public, static branding pages without requiring login or workin
 These pages contain no account data or deployment secrets and link from the sign-in page. Keep their disclosures accurate for your installation, especially classification providers, data use and retention. Supply your monitored support contact in the Google consent configuration. Google's [branding requirements](https://support.google.com/cloud/answer/15549049) also require the homepage on a verified domain you own; complete any domain verification or custom-domain setup Google requires before publishing. The pages do not bypass Google verification.
 
 To host the public pages on a separate company or personal website, publish a product homepage and its `/privacy` and `/terms` child pages there. Set `LIFE_OS_BRANDING_URL` privately in Vercel to that homepage's HTTPS URL. LifeOS's `/about`, `/privacy` and `/terms` routes then redirect to those canonical pages without forwarding query strings, cookies or account data. Use the canonical website URLs directly in Google Branding. The setting must not contain credentials, a query string or a fragment. Leave it unset to serve the built-in pages. This does not change `LIFE_OS_PUBLIC_URL`, the OAuth callback, or private dashboard access.
+
+For a company-wide policy site with an app selector, set the branding URL to the company origin and set `LIFE_OS_BRANDING_APP=lifeos`. Policy links will open `/privacy?app=lifeos` and `/terms?app=lifeos`; the About link still opens the company homepage. The selector is optional and must start with a lowercase letter, followed by lowercase letters, digits or hyphens, up to 64 characters total. The selected app must exist on your policy site. Incoming request parameters never override this server setting.
 
 `LIFE_OS_ALLOWED_EMAIL` is required and accepts one complete email address. Surrounding whitespace is trimmed and casing normalized to lowercase. Domains, wildcards, address lists and malformed addresses are rejected. The verified Google email must match that address exactly; sharing its domain does not grant access, and dots or plus aliases are not rewritten. An absent or invalid owner setting disables login and API access.
 

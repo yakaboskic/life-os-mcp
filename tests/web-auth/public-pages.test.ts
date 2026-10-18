@@ -89,4 +89,21 @@ describe("public LifeOS information pages", () => {
     expect(response.headers.get("location")).toBeNull();
     expect(await response.text()).toBe("Public information is temporarily unavailable.");
   });
+
+  it("opens the configured app selection on shared company policies", async () => {
+    const handler = createWebHandler({ env: { LIFE_OS_BRANDING_URL: "https://www.example.com", LIFE_OS_BRANDING_APP: "lifeos" } });
+    for (const path of paths) {
+      const response = await handler(new Request(`${origin}${path}?app=untrusted&secret=private`));
+      expect(response.status).toBe(308);
+      expect(response.headers.get("location")).toBe(`https://www.example.com${path === "/about" ? "/" : `${path}?app=lifeos`}`);
+    }
+  });
+
+  it("rejects a malformed configured app selection without exposing it", async () => {
+    const handler = createWebHandler({ env: { LIFE_OS_BRANDING_URL: "https://www.example.com", LIFE_OS_BRANDING_APP: "lifeos&secret=private" } });
+    const response = await handler(new Request(`${origin}/privacy`));
+    expect(response.status).toBe(503);
+    expect(response.headers.get("location")).toBeNull();
+    expect(await response.text()).toBe("Public information is temporarily unavailable.");
+  });
 });
