@@ -1,12 +1,12 @@
-import { loadConfig } from "../core/config.js";
-import { createLogger } from "../core/logger.js";
-import { createDaemon } from "../runtime/daemon.js";
 import { requestBackend } from "../runtime/client.js";
-import { readFileSync } from "node:fs";
-import { createPrivateWebBridge } from "../runtime/web-bridge.js";
 import { randomUUID } from "node:crypto";
 
 export async function daemon():Promise<void> {
+  const { loadConfig } = await import("../core/config.js");
+  const { createLogger } = await import("../core/logger.js");
+  const { createDaemon } = await import("../runtime/daemon.js");
+  const { createPrivateWebBridge } = await import("../runtime/web-bridge.js");
+  const { readFileSync } = await import("node:fs");
   process.env.TZ ??= "America/New_York";
   const config=loadConfig(),logger=createLogger();
   const app=await createDaemon(config,logger);

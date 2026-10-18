@@ -114,6 +114,12 @@ Open `http://localhost:4747`. For MCP, run the thin `life-os serve --connect htt
 
 `scripts/mcp-remote.sh` provides that SSH bridge. Configure the agent's stdio MCP command as `/bin/bash` with the absolute path to this script as its only argument. It requires an authenticated `gcloud` account with IAP/SSH access; set `LIFE_OS_GCLOUD` to the CLI's absolute path when the desktop application's PATH does not include it. Set `LIFE_OS_PROJECT` to the target project; `LIFE_OS_ZONE` and `LIFE_OS_VM` optionally override the deployment defaults. No application token or Google refresh token is copied to the laptop. Restart the MCP connection after changing the agent configuration.
 
+Each remote connection loads only the MCP transport; Google clients, local toolsets, and SQLite are loaded only by commands that need them. Jobs and automation CLI commands also use the lightweight HTTP client. Bundled CLI tests guard against importing these heavy modules or accessing local LifeOS data in remote mode.
+
+The bridge cancels backend work and exits on input EOF, broken output, or termination signals, including during its initial readiness check. Valid idle connections stay open. Per connection, requests are limited to 1 MiB per frame and 32 pending messages / 4 MiB of pending input; blocked output is limited to an 8 MiB backlog. Exceeding a limit closes the connection with an error on stderr. Requests are never automatically replayed after an uncertain failure; inspect their state before repeating a write.
+
+An existing connection keeps its loaded code after a deployment. For a memory-related bridge update, reconnect agents after the new release is ready. An attended refresh should capture exact old bridge PIDs and process start times, wait for `/readyz` to report no active requests or jobs, terminate only those bridge processes, and verify readiness between batches. Do not terminate SSH daemons or the shared application. On a small VM, compare aggregate bridge RSS/PSS and `/proc/meminfo`'s `MemAvailable`, and check for new kernel OOM kills; avoid starting a large benchmark alongside live agents. The Claude runner follows the daemon restart and retains its separate login home.
+
 ## Private web bridge and iPhone PWA
 
 After the VM private listener is implemented and configured:

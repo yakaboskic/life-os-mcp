@@ -1,8 +1,4 @@
 import { parseArgs } from "node:util";
-import { serve } from "./serve.js";
-import { authAdd, authAlias, authList, authRemove } from "./auth.js";
-import { reauth } from "./reauth.js";
-import { trackReport, trackStart, trackStatus, trackStop, trackTasks } from "./track.js";
 
 const USAGE = `life-os — Life OS MCP server
 
@@ -95,15 +91,19 @@ export async function main(argv: string[]): Promise<void> {
   }
 
   switch (command ?? "serve") {
-    case "serve":
+    case "serve": {
       if (values.connect || process.env.LIFE_OS_BACKEND_URL) {
         const { bridgeStdio } = await import("../runtime/client.js");
         await bridgeStdio(values.connect ?? process.env.LIFE_OS_BACKEND_URL!); return;
       }
+      // Remote bridges must not load local toolsets, Google clients, or storage.
+      const { serve } = await import("./serve.js");
       await serve({ toolsets: values.toolsets?.split(",").map((s) => s.trim()).filter(Boolean) });
       return;
+    }
 
-    case "auth":
+    case "auth": {
+      const { authAdd, authAlias, authList, authRemove } = await import("./auth.js");
       switch (subcommand) {
         case "add":
           await authAdd({
@@ -133,13 +133,15 @@ export async function main(argv: string[]): Promise<void> {
         default:
           throw new Error(`Unknown auth subcommand "${subcommand ?? ""}".\n\n${USAGE}`);
       }
+    }
 
     case "reauth": {
+      const { reauth } = await import("./reauth.js");
       const okAll = await reauth({ dryRun: values["dry-run"], filter: subcommand });
       return exitAfterFlush(okAll ? 0 : 1);
     }
 
-    case "track":
+    case "track": {
       if (process.env.LIFE_OS_BACKEND_URL || values.connect) {
         if (values.connect) process.env.LIFE_OS_BACKEND_URL = values.connect;
         const { callRemoteTool } = await import("../runtime/client.js");
@@ -149,6 +151,7 @@ export async function main(argv: string[]): Promise<void> {
         const result=await callRemoteTool(name,args);
         console.log(JSON.stringify(result,null,2)); if(result.isError) process.exitCode=1; return;
       }
+      const { trackReport, trackStart, trackStatus, trackStop, trackTasks } = await import("./track.js");
       switch (subcommand) {
         case "start":
           await trackStart(rest, values.note);
@@ -168,6 +171,7 @@ export async function main(argv: string[]): Promise<void> {
         default:
           throw new Error(`Unknown track subcommand "${subcommand ?? ""}".\n\n${USAGE}`);
       }
+    }
 
     case "web": {
       const { loadConfig } = await import("../core/config.js");
