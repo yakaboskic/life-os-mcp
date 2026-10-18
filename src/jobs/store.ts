@@ -23,6 +23,7 @@ export class JobStore {
       CREATE TABLE IF NOT EXISTS triage_reviews (id TEXT PRIMARY KEY REFERENCES triage_work(id), resolved_at TEXT, json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS triage_task_links (account TEXT NOT NULL, thread_id TEXT NOT NULL, task_id TEXT NOT NULL, active INTEGER NOT NULL, json TEXT NOT NULL, PRIMARY KEY(account,thread_id));
       CREATE TABLE IF NOT EXISTS triage_mutation_attempts (id TEXT PRIMARY KEY, work_id TEXT NOT NULL REFERENCES triage_work(id), started_at TEXT NOT NULL, outcome TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS owned_generated_messages (account TEXT NOT NULL, rfc_message_id TEXT NOT NULL, gmail_message_id TEXT, PRIMARY KEY(account,rfc_message_id));
     `);
   }
   recoverInterrupted(): void {
@@ -45,7 +46,18 @@ export class JobStore {
       this.db.prepare("INSERT INTO triage_reviews VALUES(?,NULL,?) ON CONFLICT(id) DO UPDATE SET resolved_at=NULL,json=excluded.json").run(item.id, JSON.stringify(review));
     });
   }
-  reviews(): ReviewItem[] { return this.db.prepare("SELECT json FROM triage_reviews WHERE resolved_at IS NULL ORDER BY rowid").all().map((row) => decode<ReviewItem>(row)!); }
+  reviews(): ReviewItem[] { return this.db.prepare("SELECT json FROM triage_reviews WHERE resolved_at IS NULL ORDER BY rowid").all().map((row) => { const review = decode<ReviewItem>(row)!; const work = this.work(review.id); return { ...review, mode: work?.mode, revision: work?.revision, reviewable: work?.mode === "apply" && work.kind === "classify" && !work.plan && review.reason === "LOW_CONFIDENCE" }; }); }
+  isOwnedMessage(account: string, id: string, rfcId?: string): boolean { return !!this.db.prepare("SELECT 1 FROM owned_generated_messages WHERE account=? AND (gmail_message_id=? OR rfc_message_id=?)").get(account, id, rfcId ?? ""); }
+  acceptAgent(id: string, decision: Decision): ReviewItem {
+    return transaction(this.db, () => {
+      const item = this.work(id); const review = this.reviews().find((entry) => entry.id === id);
+      if (!item || !review?.reviewable || !decision.agentReview || item.revision !== decision.agentReview.revision) throw new Error("REVIEW_NOT_RESOLVABLE");
+      item.decision = decision; item.state = "classified"; delete item.reason; this.saveWork(item);
+      review.category = decision.category; review.confidence = decision.confidence; review.resolvedAt = new Date().toISOString();
+      this.db.prepare("UPDATE triage_reviews SET resolved_at=?,json=? WHERE id=?").run(review.resolvedAt, JSON.stringify(review), id);
+      return review;
+    });
+  }
   resolve(id: string, category: Category): ReviewItem {
     return transaction(this.db, () => {
       const item = this.work(id);

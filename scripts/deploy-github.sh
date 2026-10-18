@@ -42,8 +42,8 @@ while (( SECONDS < deadline )); do
   state=$(python3 -c 'import json,sys;print(json.load(sys.stdin)["status"])' <<<"$result")
   echo "VM deployment: $state"
   case "$state" in
-    succeeded) exit 0;;
-    superseded) echo 'A newer verified deployment already reached the VM.'; exit 0;;
+    succeeded) if [[ -n ${GITHUB_OUTPUT:-} ]]; then echo 'deployed=true' >>"$GITHUB_OUTPUT"; fi; exit 0;;
+    superseded) echo 'A newer verified deployment already reached the VM.'; if [[ -n ${GITHUB_OUTPUT:-} ]]; then echo 'deployed=false' >>"$GITHUB_OUTPUT"; fi; exit 0;;
     failed*) echo 'Deployment failed. Read the detached VM unit journal.' >&2; exit 1;;
   esac
 done

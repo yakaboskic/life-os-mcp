@@ -8,6 +8,12 @@ import { PORTAL_HTML } from "./page.js";
 import { PWA_ASSETS } from "./pwa.js";
 import { safeBrowserRequest } from "../runtime/security.js";
 import type { JobStatus, JobRun } from "../jobs/types.js";
+import { withRevision } from "../runtime/actions.js";
+
+export interface WebFeatures {
+  actions?: boolean;
+  automationSnapshot?: () => unknown;
+}
 
 const ENTRY_WINDOW_DAYS = 90;
 
@@ -17,7 +23,7 @@ const ENTRY_WINDOW_DAYS = 90;
  * binds it to 127.0.0.1 exclusively — this is a local dashboard, not a
  * network service.
  */
-export function createWebServer(config: LifeOsConfig, jobSnapshot?: () => {status:JobStatus;runs:JobRun[]}): Server {
+export function createWebServer(config: LifeOsConfig, jobSnapshot?: () => {status:JobStatus;runs:JobRun[]}, features: WebFeatures = {}): Server {
   const store = new TrackStore(config);
 
   return createServer((req, res) => {
@@ -32,6 +38,11 @@ export function createWebServer(config: LifeOsConfig, jobSnapshot?: () => {statu
     const asset=PWA_ASSETS[path];
     if(asset) {
       res.writeHead(200,{"content-type":asset.contentType,"cache-control":"no-store","service-worker-allowed":"/"}).end(asset.body);
+      return;
+    }
+
+    if (path === "/api/automation" && features.automationSnapshot) {
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" }).end(JSON.stringify(features.automationSnapshot()));
       return;
     }
 
@@ -59,13 +70,14 @@ export function createWebServer(config: LifeOsConfig, jobSnapshot?: () => {statu
       });
       const payload = {
         generatedAt: new Date().toISOString(),
+        capabilities: { actions: features.actions === true, automation: !!features.automationSnapshot },
         weeklyTargetHours: reg.weeklyTargetHours,
-        activeTimer: store.getTimer(),
+        activeTimer: store.getTimer() ? withRevision(store.getTimer()!) : null,
         statusSemantics: STATUS_SEMANTICS,
         products: reg.products.map(withCheckIn),
         projects: reg.projects.map(withCheckIn),
-        tasks: reg.tasks,
-        entries: store.listEntries({ from: cutoff }),
+        tasks: reg.tasks.map(withRevision),
+        entries: store.listEntries({ from: cutoff }).map(withRevision),
       };
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
       res.end(JSON.stringify(payload));

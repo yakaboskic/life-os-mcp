@@ -11,6 +11,9 @@ Usage:
   life-os serve --connect <url>         Remote stdio bridge (no local data fallback)
   life-os jobs run gmail-triage --mode dry-run|apply --wait [--scheduled]
   life-os jobs status | retry <run-id>   Durable job history / resume
+  life-os automation status             Agent reviews, daily brief and delivery status
+  life-os automation run review|brief|daily [--request-id <id>]
+  life-os automation schedule --time HH:MM --enable|--disable
   life-os triage review list | resolve <id> --category <category>
   life-os db migrate                    Validate and import legacy tracker files
   life-os backup create --output <dir> | verify <dir>
@@ -63,6 +66,10 @@ export async function main(argv: string[]): Promise<void> {
       mode: { type: "string" },
       wait: { type: "boolean" },
       scheduled: { type: "boolean" },
+      time: { type: "string" },
+      enable: { type: "boolean" },
+      disable: { type: "boolean" },
+      "request-id": { type: "string" },
       output: { type: "string" },
       category: { type: "string" },
       "no-browser": { type: "boolean" },
@@ -180,10 +187,18 @@ export async function main(argv: string[]): Promise<void> {
     case "daemon": {
       const {daemon}=await import("./runtime.js"); await daemon(); return;
     }
+    case "agent-runner": {
+      const {agentRunner}=await import("../runtime/claude-runner.js");await agentRunner();return;
+    }
     case "jobs": {
       const {jobsCommand}=await import("./runtime.js");
       if(values.connect) process.env.LIFE_OS_BACKEND_URL=values.connect;
       await jobsCommand(subcommand,rest,{mode:values.mode,wait:values.wait,scheduled:values.scheduled});return;
+    }
+    case "automation": {
+      const {automationCommand}=await import("./runtime.js");
+      if(values.connect) process.env.LIFE_OS_BACKEND_URL=values.connect;
+      await automationCommand(subcommand,rest,{time:values.time,enable:values.enable,disable:values.disable,requestId:values["request-id"]});return;
     }
     case "triage": {
       const {requestBackend}=await import("../runtime/client.js");

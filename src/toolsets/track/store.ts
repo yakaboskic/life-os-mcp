@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { openDatabase, transaction } from "../../state/database.js";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { ToolInputError } from "../../core/errors.js";
 import type { LifeOsConfig } from "../../core/config.js";
 import { parseWhen } from "./time.js";
@@ -27,6 +27,12 @@ function slugify(name: string): string {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function taskTitle(value: string): string {
+  const title = value.trim();
+  if (!title || title.length > 500) throw new ToolInputError("Task title must contain 1 to 500 characters.");
+  return title;
 }
 
 /** SQLite tracker. Every mutation holds an immediate transaction, including timer transitions. */
@@ -184,7 +190,7 @@ export class TrackStore {
     const reg = this.loadRegistry();
     const task: Task = {
       id: `t${reg.nextTaskNum}`,
-      title: input.title,
+      title: taskTitle(input.title),
       projectId,
       status: "open",
       notes: input.notes,
@@ -198,16 +204,19 @@ export class TrackStore {
 
   updateTask(
     idOrName: string,
-    patch: { title?: string; project?: string; status?: "open" | "done"; notes?: string },
+    patch: { title?: string; project?: string | null; status?: "open" | "done"; notes?: string },
   ): Task {
     const target = this.resolveTask(idOrName);
-    const projectId = patch.project !== undefined ? this.resolveProject(patch.project).id : undefined;
+    const projectId = patch.project != null ? this.resolveProject(patch.project).id : undefined;
     const reg = this.loadRegistry();
     const task = reg.tasks.find((t) => t.id === target.id)!;
-    if (patch.title !== undefined) task.title = patch.title;
+    if (patch.title !== undefined) task.title = taskTitle(patch.title);
     if (patch.notes !== undefined) task.notes = patch.notes;
     if (projectId !== undefined) task.projectId = projectId;
+    if (patch.project === null) delete task.projectId;
     if (patch.status !== undefined && patch.status !== task.status) {
+      // Keep browser and MCP completion semantics identical and atomic.
+      if (patch.status === "done" && this.getTimer()?.taskId === task.id) this.stopTimer();
       task.status = patch.status;
       task.done_at = patch.status === "done" ? nowIso() : undefined;
     }
@@ -225,6 +234,7 @@ export class TrackStore {
   /** Starts the stopwatch on a task; auto-stops (and records) any running timer. */
   startTimer(taskInput: string, note?: string): { stopped: TimeEntry | null; timer: TimerState; task: Task } {
     const task = this.resolveTask(taskInput);
+    if (task.status === "done") throw new ToolInputError("Reopen this task before starting its timer.");
     let stopped: TimeEntry | null = null;
     const running = this.getTimer();
     if (running) {
@@ -233,7 +243,7 @@ export class TrackStore {
       }
       stopped = this.stopTimer();
     }
-    const timer: TimerState = { taskId: task.id, start: nowIso(), ...(note ? { note } : {}) };
+    const timer: TimerState = { id: randomUUID(), taskId: task.id, start: nowIso(), ...(note ? { note } : {}) };
     this.db.prepare("INSERT OR REPLACE INTO active_timer VALUES(1,?,?)").run(timer.taskId, JSON.stringify(timer));
     return { stopped, timer, task };
   }

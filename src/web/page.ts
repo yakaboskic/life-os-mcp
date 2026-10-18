@@ -1,5 +1,5 @@
 /**
- * Private, read-only Starfleet-inspired operations console.
+ * Private, interactive Starfleet-inspired operations console.
  * Self-contained assets; every chart and status is derived from live API data.
  */
 export const PORTAL_HTML = `<!doctype html>
@@ -44,7 +44,7 @@ export const PORTAL_HTML = `<!doctype html>
   html { scrollbar-gutter: stable; }
   body { background: var(--paper); color: var(--ink); font: 15px/1.5 var(--sans); max-width: 1600px; margin: 0 auto; padding: max(28px, env(safe-area-inset-top)) clamp(18px, 3.8vw, 60px) max(32px, env(safe-area-inset-bottom)); }
   a { color: var(--accent-2); text-underline-offset: 3px; }
-  button, input { font: inherit; }
+  button, input, select, textarea { font: inherit; }
   button { cursor: pointer; }
   :focus-visible { outline: 2px solid var(--amber); outline-offset: 4px; }
   [hidden] { display: none !important; }
@@ -321,6 +321,71 @@ export const PORTAL_HTML = `<!doctype html>
     .dialog-header, .dialog-body { padding: 18px; }
   }
   @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
+
+  .action-button, .text-button { min-height: 44px; padding: 10px 14px; border: 1px solid var(--accent); background: var(--accent); color: var(--paper); font-size: 13px; font-weight: 600; border-radius: 2px 8px 2px 2px; }
+  .action-button:hover { background: var(--accent-2); }
+  .quiet-button { min-height: 44px; }
+  .text-button { background: transparent; color: var(--ink-2); border-color: transparent; }
+  .text-button:hover { color: var(--accent); background: var(--accent-soft); }
+  .danger-text { color: var(--red); }
+  button:disabled { cursor: not-allowed; opacity: .45; }
+  .focus-controls { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 20px; }
+  .focus-controls .danger-text { padding-left: 0; font-size: 12px; }
+  .section-actions, .task-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .section-actions { margin-bottom: 18px; }
+  .task-item:has(.task-toggle) { grid-template-columns: 44px minmax(0, 1fr) auto; }
+  .task-toggle { width: 44px; min-height: 44px; padding: 0; color: var(--accent); background: var(--surface-deep); border: 1px solid var(--rule); font-size: 20px; }
+  .task-toggle:hover { border-color: var(--accent); }
+  .task-actions { grid-column: 2 / -1; margin-top: 8px; }
+  .task-actions button { font-size: 12px; padding: 8px 12px; }
+  .action-feedback, .session-notice { padding: 12px 16px; margin: 0 0 18px; border-left: 3px solid var(--accent); background: var(--accent-soft); color: var(--ink-2); font-size: 13px; overflow-wrap: anywhere; }
+  .action-feedback.is-error, .session-notice { border-color: var(--amber); }
+  .session-notice a { display: inline-block; padding: 10px 6px; }
+  .action-description { color: var(--muted); margin-bottom: 20px; font-size: 13px; }
+  .action-fields { border: 0; padding: 0; min-width: 0; }
+  .form-field { display: grid; gap: 7px; margin-bottom: 18px; font-size: 13px; color: var(--ink-2); min-width: 0; }
+  .form-field input, .form-field select, .form-field textarea { width: 100%; min-width: 0; min-height: 44px; border: 1px solid var(--rule); border-radius: 2px; background: var(--surface-deep); color: var(--ink); padding: 10px 12px; font-size: 16px; }
+  .form-field textarea { resize: vertical; }
+  .form-field small { color: var(--muted); }
+  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .form-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; padding-top: 16px; border-top: 1px solid var(--line); }
+  .form-error { padding: 12px; border-left: 3px solid var(--red); background: #352523; color: var(--ink); margin-bottom: 16px; font-size: 13px; }
+  #action-dialog { width: min(600px, calc(100vw - 24px)); max-height: 90dvh; }
+  #action-dialog .dialog-shell { max-height: 90dvh; }
+  #action-dialog .dialog-close { min-width: 44px; min-height: 44px; }
+  @media (max-width: 600px) {
+    .form-grid { grid-template-columns: 1fr; gap: 0; }
+    .form-actions > button { flex: 1; }
+    .task-item:has(.task-toggle) { grid-template-columns: 44px minmax(0, 1fr); }
+    .task-actions { gap: 4px; }
+    .task-actions button { padding: 8px; }
+  }
+
+
+  #automation-panel { margin-top: 28px; }
+  .automation-summary { color: var(--ink-2); font-size: 13px; margin-bottom: 16px; }
+  .automation-detail { color: var(--muted); font-size: 12px; margin: 8px 0; overflow-wrap: anywhere; }
+  .automation-history-row { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 12px; border-bottom: 1px solid var(--line); padding: 12px 0; font-size: 12px; }
+  .automation-history-row small { display: block; color: var(--muted); margin-top: 3px; }
+  .automation-history-row > span:last-child { text-align: right; color: var(--muted); }
+  .review-row { display: flex; gap: 16px; justify-content: space-between; align-items: center; padding: 18px 20px; border-bottom: 1px solid var(--line); }
+  .review-row:last-child { border-bottom: 0; }
+  .review-row h3 { font-size: 14px; font-weight: 550; overflow-wrap: anywhere; }
+  .review-row p, #review-queue .portfolio-heading p { color: var(--muted); font-size: 12px; margin-top: 5px; overflow-wrap: anywhere; }
+  .review-row > div { min-width: 0; }
+  .review-row button { flex-shrink: 0; }
+  .review-context { padding: 14px; margin-bottom: 20px; background: var(--surface-deep); border-left: 3px solid var(--amber); overflow-wrap: anywhere; }
+  .review-context p { color: var(--muted); font-size: 13px; margin: 5px 0; }
+  .review-context a { display: inline-block; padding: 12px 0 0; }
+  .review-rationale { border-left-color: var(--accent); }
+  .review-rationale .rationale-text { color: var(--ink); white-space: pre-wrap; }
+  .decision-history { margin-top: 18px; }
+  .decision-history summary { color: var(--ink-2); cursor: pointer; font-size: 12px; padding-bottom: 10px; }
+  .decision-history .review-context { margin-bottom: 10px; }
+  .form-check { display: flex; align-items: center; gap: 10px; min-height: 44px; margin-bottom: 14px; font-size: 14px; }
+  .form-check input { width: 20px; height: 20px; accent-color: var(--accent); }
+  @media (max-width: 600px) { .review-row { display: block; padding: 16px; } .review-row button { margin-top: 12px; } .automation-history-row { grid-template-columns: 1fr auto; } .automation-history-row > span:last-child { grid-column: 1 / -1; text-align: left; } }
+
 </style>
 </head>
 <body>
@@ -348,6 +413,8 @@ export const PORTAL_HTML = `<!doctype html>
     <div class="system-cell"><span class="system-label">Needs review</span><span class="system-value" id="attention-count">Loading…</span></div>
   </div>
   <main id="main-content" tabindex="-1">
+  <div id="session-notice" class="session-notice" hidden>Sign in again to continue. <a href="/auth/login" target="_blank" rel="noopener">Sign in with Google</a><button id="refresh-connection" class="quiet-button" type="button">I’ve signed in · refresh</button></div>
+  <p id="action-feedback" class="action-feedback" role="status" aria-live="polite" hidden></p>
   <div id="view-time">
     <section>
       <span class="section-kicker">Time</span>
@@ -357,9 +424,11 @@ export const PORTAL_HTML = `<!doctype html>
         <div class="timer-card soft-panel">
           <div class="label">Current focus</div>
           <div><div class="value" id="timer-value">—</div><div class="detail" id="timer-detail">Waiting for data</div></div>
+          <div id="focus-controls" class="focus-controls"></div>
         </div>
         <div class="tape-card panel"><div class="panel-label">Today’s activity</div><div class="tape" id="daytape"></div><div class="tapelegend" id="tapelegend"></div></div>
       </div>
+      <div class="section-actions"><button id="log-time-button" class="quiet-button" type="button" data-write-control hidden>Log time</button></div>
       <div class="statband">
         <div class="stat"><div class="label">Today</div><div class="value" id="today-value">—</div><div class="detail" id="today-detail"></div></div>
         <div class="stat"><div class="label">This week</div><div class="value" id="week-value">—</div><div class="detail" id="week-detail"></div><div class="meter"><div id="week-meter" style="width:0%"></div></div></div>
@@ -385,6 +454,7 @@ export const PORTAL_HTML = `<!doctype html>
         <div id="today-briefing"><p class="mutetext">Loading…</p></div>
         <div id="today-queue"></div>
       </div>
+      <div id="automation-panel" class="operations-panel panel" hidden></div>
     </section>
   </div>
 
@@ -392,6 +462,7 @@ export const PORTAL_HTML = `<!doctype html>
     <section><span class="section-kicker">Tasks</span><h2>Task queue</h2>
       <p class="section-intro">Open tasks across your projects. Source notes include the original context.</p>
       <div class="taskbar">
+        <button id="new-task-button" class="action-button" type="button" data-write-control hidden>New task</button>
         <label><input type="checkbox" id="show-done"> Show completed</label>
         <span class="mutetext" id="task-count"></span>
       </div>
@@ -403,6 +474,7 @@ export const PORTAL_HTML = `<!doctype html>
     <section><h2>Gmail operations</h2>
       <p class="section-intro">Scheduled triage, account health, and decisions awaiting review.</p>
       <div id="job-operations" class="operations-panel panel"><p class="mutetext">Loading job status…</p></div>
+      <section id="review-queue" hidden></section>
       <h2>Run reports</h2>
       <div class="taskbar">
         <label><input type="radio" name="tfilter" value="today" checked> Today</label>
@@ -423,7 +495,19 @@ export const PORTAL_HTML = `<!doctype html>
       <div class="dialog-body" id="dialog-body"></div>
     </div>
   </dialog>
-  <footer>Private LifeOS console · Read-only view · Make changes through your connected agent or the LifeOS CLI.</footer>
+  <dialog id="action-dialog" aria-labelledby="action-title" aria-describedby="action-description">
+    <div class="dialog-shell">
+      <header class="dialog-header"><div><div class="dialog-kicker">Shared with your agents</div><h2 id="action-title"></h2></div><button id="action-close" class="dialog-close" type="button" aria-label="Close form">×</button></header>
+      <div class="dialog-body"><p id="action-description" class="action-description"></p>
+        <form id="action-form"><fieldset id="action-fields" class="action-fields"></fieldset>
+          <p id="action-error" class="form-error" role="alert" hidden></p>
+          <div id="action-session" class="session-notice" hidden><a href="/auth/login" target="_blank" rel="noopener">Sign in with Google</a><button id="action-refresh-session" class="quiet-button" type="button">I’ve signed in · refresh</button></div>
+          <div class="form-actions"><button id="action-cancel" class="quiet-button" type="button">Cancel</button><button id="action-submit" class="action-button" type="submit">Save</button></div>
+        </form>
+      </div>
+    </div>
+  </dialog>
+  <footer id="portal-footer">Private LifeOS console · Read-only view · Make changes through your connected agent or the LifeOS CLI.</footer>
 
 <script>
 (() => {
@@ -561,7 +645,7 @@ export const PORTAL_HTML = `<!doctype html>
     }
 
     $("today-line").textContent = new Intl.DateTimeFormat(undefined, { weekday: "long", month: "long", day: "numeric" }).format(now);
-    $("updated").textContent = "Read-only · data refreshed " + timeHM(data.generatedAt);
+    $("updated").textContent = (data.capabilities?.actions ? "Data refreshed " : "Read-only · data refreshed ") + timeHM(data.generatedAt);
     const timer = data.activeTimer;
     if (timer) {
       const t = tasksById.get(timer.taskId);
@@ -681,7 +765,7 @@ export const PORTAL_HTML = `<!doctype html>
       byDayEntries.get(k).push(e);
     }
     const days = [...byDayEntries.keys()].sort().reverse().slice(0, 14);
-    $("entries").innerHTML = days.length === 0 ? '<span class="mutetext">No entries yet — start the stopwatch or log time via your agent.</span>'
+    $("entries").innerHTML = days.length === 0 ? '<span class="mutetext">No entries yet — start a focus session or log time.</span>'
       : "<table>" + days.map((k) => {
           const list = byDayEntries.get(k).sort((a, b) => b.start.localeCompare(a.start));
           const total = list.reduce((acc, e) => acc + e.seconds, 0);
@@ -692,10 +776,11 @@ export const PORTAL_HTML = `<!doctype html>
               const proj = projOf(e.taskId);
               return "<tr><td class='num mutetext'>" + timeHM(e.start) + "–" + timeHM(e.end) + "</td>" +
                 "<td>" + esc(t ? t.title : e.taskId) + (proj ? " <span class='mutetext'>· " + esc(proj.name) + "</span>" : "") + "</td>" +
-                "<td class='note'>" + esc(e.note || "") + "</td><td class='num'>" + fmt(e.seconds) + "</td></tr>";
+                "<td class='note'>" + esc(e.note || "") + "</td><td class='num'>" + fmt(e.seconds) + (data.capabilities?.actions ? "<br><button class='text-button' type='button' data-write-control data-entry-edit='" + esc(e.id) + "'>Edit</button>" : "") + "</td></tr>";
             }).join("");
         }).join("") + "</table>";
 
+    renderFocusControls();
     renderTape();
     renderTasks();
     renderToday();
@@ -737,7 +822,8 @@ export const PORTAL_HTML = `<!doctype html>
 
   function openRecentTimeDialog() {
     const content = $("entries").innerHTML || "<p class='mutetext'>No entries yet.</p>";
-    openDetailDialog("Time", "Recent entries", "<div class='tablewrap'>" + content + "</div>");
+    openDetailDialog("Time", "Recent entries", (data?.capabilities?.actions ? "<div class='section-actions'><button class='action-button' type='button' data-write-control data-log-time>Log time</button></div>" : "") + "<div class='tablewrap'>" + content + "</div>");
+    refreshActionControls();
   }
 
   function sourceNotesToHtml(notes) {
@@ -789,13 +875,15 @@ export const PORTAL_HTML = `<!doctype html>
           const created = String(t.created_at || "").slice(0, 10);
           const notes = String(t.notes || "").trim();
           return "<article class='task-item" + (t.status === "open" ? "" : " is-done") + "' title='" + esc(t.id) + "'>" +
-            "<span class='task-check' aria-hidden='true'></span>" +
+            (data.capabilities?.actions ? "<button class='task-toggle' type='button' data-write-control data-task-toggle='" + esc(t.id) + "' aria-label='" + esc((t.status === "open" ? "Complete " : "Reopen ") + t.title) + "'>" + (t.status === "open" ? "□" : "✓") + "</button>" : "<span class='task-check' aria-hidden='true'></span>") +
             "<div class='task-main'><div class='task-title'>" + title + "</div><div class='task-meta'>" + source +
             "<span>" + projCell(t) + "</span>" + (t.status === "open" ? "" : "<span>completed</span>") + "</div></div>" +
             "<span class='task-age'>" + esc(created) + "</span>" +
+            (data.capabilities?.actions ? "<div class='task-actions'><button class='text-button' type='button' data-write-control data-task-edit='" + esc(t.id) + "'>Edit task</button>" + (t.status === "open" ? "<button class='quiet-button' type='button' data-write-control data-task-focus='" + esc(t.id) + "'" + (data.activeTimer?.taskId === t.id ? " data-current-focus disabled" : "") + ">" + (data.activeTimer?.taskId === t.id ? "In focus" : "Start focus") + "</button>" : "") + "</div>" : "") +
             (notes ? "<button class='task-note-button' type='button' data-task-notes-id='" + esc(t.id) + "'>View source notes</button>" : "") +
             "</article>";
         }).join("") + "</div>";
+    refreshActionControls();
   }
 
   // ---- triage reports ----
@@ -886,7 +974,15 @@ export const PORTAL_HTML = `<!doctype html>
     const todayK = dayKey(new Date());
     let html = "";
     const briefing = triage ? (triage.reports || []).find((r) => r.name === "briefing") : null;
-    if (briefing) {
+    latestBriefing = null;
+    if (automation?.briefing) {
+      const artifact = automation.briefing;
+      latestBriefing = { heading: artifact.day, html: mdToHtml(artifact.markdown) };
+      const summary = String(artifact.markdown).split("\\n").map((line) => line.trim()).find((line) => line && !line.startsWith("#")) || "Your briefing is ready.";
+      html = "<div class='briefing-card panel'><div class='briefing-label'>Start here · " + esc(artifact.day) + "</div>" +
+        "<div class='mdbody'>" + mdToHtml(summary) + "</div><p class='automation-detail'>Generated " + jobTime(artifact.createdAt) + (automationAvailable ? "" : " · last received briefing") + "</p>" +
+        "<button class='inline-detail-button' id='briefing-full-button' type='button'>Read the full briefing</button></div>";
+    } else if (briefing) {
       const latest = splitSections(briefing.content)[0];
       if (latest) {
         const isToday = latest.heading.slice(0, 10) === todayK;
@@ -949,9 +1045,9 @@ export const PORTAL_HTML = `<!doctype html>
   const successful = (run) => ["completed", "succeeded", "success"].includes(run.status) && run.mode !== "dry-run";
   const count = (n) => Number.isFinite(n) && n >= 0 ? n : 0;
   const jobBadge = (status) => {
-    const tone = ["completed", "succeeded", "success", "ready"].includes(status) ? "good"
-      : ["failed", "auth_blocked", "error"].includes(status) ? "error"
-      : ["needs_review", "partial", "running", "retryable", "blocked"].includes(status) ? "warn" : "";
+    const tone = ["completed", "succeeded", "success", "ready", "sent"].includes(status) ? "good"
+      : ["failed", "auth_blocked", "error", "uncertain"].includes(status) ? "error"
+      : ["needs_review", "partial", "running", "retryable", "blocked", "pending", "queued", "retry_wait", "sending"].includes(status) ? "warn" : "";
     return "<span class='job-state " + tone + "'>" + esc(jobStatus(status)) + "</span>";
   };
   function renderConnection() {
@@ -1037,6 +1133,310 @@ export const PORTAL_HTML = `<!doctype html>
     });
   }
 
+  // ---- shared browser actions ----
+  let authExpired = false;
+  let actionEditor = null;
+  let actionBusy = false;
+  let refreshSequence = 0;
+  const canAct = () => !!data?.capabilities?.actions && dataAvailable && !authExpired && !actionBusy;
+  function localInputValue(value) {
+    const d = new Date(value);
+    return dayKey(d) + "T" + pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
+  }
+  function timeInputToIso(value) {
+    if (!value) throw new Error("Choose a date and time.");
+    const d = new Date(value);
+    if (!Number.isFinite(d.getTime())) throw new Error("Choose a valid date and time.");
+    // A spring-forward gap is silently normalized by Date; do not save a different wall time.
+    if (localInputValue(d).slice(0, value.length) !== value) throw new Error("That time does not exist in your current time zone. Choose another time.");
+    return d.toISOString();
+  }
+  function actionRequest(previous, action, input) {
+    const fingerprint = JSON.stringify({ action, input });
+    return previous?.fingerprint === fingerprint ? previous : { fingerprint, body: { requestId: crypto.randomUUID(), action, input } };
+  }
+  function actionErrorMessage(code, fallback = "The operation could not finish. Try again after checking the connection.") {
+    const messages = {
+      CLAUDE_LOGIN_REQUIRED: "Sign in to Claude Code on the VM, then run the workflow again.",
+      CLAUDE_QUOTA_EXHAUSTED: "Claude usage is exhausted. Wait for your allowance to reset before running again.",
+      CLAUDE_RUNNER_UNAVAILABLE: "The Claude worker is unavailable on the VM. Check that Claude Code is installed and ready.",
+      CLAUDE_RUNNER_TIMEOUT: "The Claude worker timed out. Check its run status before trying again.",
+      CLAUDE_RUNNER_CANCELLED: "The Claude worker was interrupted. Check its run status before trying again.",
+      CLAUDE_RUNNER_FAILED: "The Claude worker could not finish. Check its sign-in and try again.",
+      AUTOMATION_DEADLINE: "The workflow reached its time limit. Review its progress before trying again.",
+      AUTOMATION_BUSY: "Another workflow is running. Wait for it to finish, then retry.",
+      AUTOMATION_DRAINING: "LifeOS is updating. Retry when the connection is ready.",
+      AUTOMATION_NOT_CONFIGURED: "The workflow is not ready. Check the Claude worker and your briefing email settings on the VM.",
+      DAILY_MODEL_BUDGET_EXHAUSTED: "The daily Claude budget has been reached. The workflow can resume after the daily reset.",
+      BRIEF_DELIVERY_NOT_CONFIGURED: "Connect the Gmail account used to email your briefing, then try again.",
+      BRIEF_SEND_UNCERTAIN: "Email delivery is being checked before another send is attempted.",
+      BRIEF_RECONCILIATION_PENDING: "Email delivery is still being checked. Do not resend manually.",
+      SEND_INTERRUPTED: "Sending was interrupted. LifeOS will check whether the email arrived before sending again.",
+      DAEMON_RESTARTED: "LifeOS restarted during this run. Check the latest attempt for progress.",
+      REVIEW_NOT_ELIGIBLE: "This review is no longer actionable. Refresh the queue to see its current state.",
+      REVIEW_SERVICE_UNAVAILABLE: "Email review is temporarily unavailable. Check the connected Gmail account and try again.",
+    };
+    if (Object.hasOwn(messages, code)) return messages[code];
+    return /^[A-Z][A-Z0-9_]+$/.test(String(fallback)) ? "The workflow could not finish. Check its latest run and try again." : fallback;
+  }
+  function actionFeedback(message, failed = false) {
+    const el = $("action-feedback"); el.textContent = message; el.hidden = !message;
+    el.classList.toggle("is-error", failed);
+  }
+  function refreshActionControls() {
+    const enabled = !!data?.capabilities?.actions;
+    document.querySelectorAll("[data-write-control]").forEach((el) => { el.hidden = !enabled; el.disabled = !canAct() || el.hasAttribute("data-current-focus") || el.hasAttribute("data-review-unavailable") || ((el.hasAttribute("data-automation-run") || el.hasAttribute("data-automation-settings") || el.hasAttribute("data-review-item")) && (!automationAvailable || automation?.paused || (el.hasAttribute("data-automation-run") && !automation?.configured))); });
+    $("session-notice").hidden = !authExpired;
+    $("action-session").hidden = !authExpired;
+    $("action-close").disabled = actionBusy;
+    $("action-cancel").disabled = actionBusy;
+    $("portal-footer").textContent = enabled ? "Private LifeOS console · Shared with your connected agents" : "Private LifeOS console · Read-only view · Make changes through your connected agent or the LifeOS CLI.";
+    if (actionEditor) {
+      $("action-submit").disabled = !canAct();
+      $("action-fields").disabled = actionBusy || actionEditor.uncertain === true;
+      $("action-dialog").setAttribute("aria-busy", String(actionBusy));
+    }
+  }
+  function renderFocusControls() {
+    const active = data?.activeTimer;
+    $("focus-controls").innerHTML = active
+      ? '<button class="action-button" type="button" data-write-control data-focus-action="stop">Stop and save</button><button class="quiet-button" type="button" data-write-control data-focus-action="start">Switch task</button><button class="text-button danger-text" type="button" data-write-control data-focus-action="cancel">Discard session</button>'
+      : '<button class="action-button" type="button" data-write-control data-focus-action="start">Start focus</button>';
+    refreshActionControls();
+  }
+  const field = (label, control, hint = "") => {
+    const name = control.split('name="')[1].split('"')[0];
+    const id = "action-field-" + name;
+    return '<div class="form-field"><label for="' + id + '">' + esc(label) + '</label>' + control.replace('name="', 'id="' + id + '" name="') + (hint ? '<small>' + esc(hint) + '</small>' : '') + '</div>';
+  };
+  const inputControl = (name, value, extra = "") => '<input name="' + name + '" value="' + esc(value ?? "") + '" ' + extra + '>';
+  const notesControl = (name, value) => '<textarea name="' + name + '" rows="4" maxlength="20000">' + esc(value || "") + '</textarea>';
+  function taskOptions(selected, openOnly = false) {
+    return data.tasks.filter((t) => !openOnly || t.status === "open").map((t) => '<option value="' + esc(t.id) + '"' + (t.id === selected ? ' selected' : '') + '>' + esc(t.title) + (t.status === "done" ? ' · completed' : '') + '</option>').join("");
+  }
+  function openActionEditor({ title, description = "", fields = "", submit, action, input, immediate = false }) {
+    if (!canAct()) return;
+    if ($("detail-dialog").open) $("detail-dialog").close();
+    actionEditor = { action, input, request: null, uncertain: false, submit };
+    $("action-title").textContent = title;
+    $("action-description").textContent = description;
+    $("action-fields").innerHTML = fields;
+    $("action-error").textContent = "";
+    $("action-error").hidden = true;
+    $("action-submit").textContent = submit;
+    $("action-dialog").showModal();
+    refreshActionControls();
+    if (immediate) $("action-form").requestSubmit();
+  }
+  function closeActionEditor() {
+    if (actionBusy) return;
+    if (actionEditor?.uncertain) actionFeedback("The last request could not be confirmed. Refresh your data before trying that action again.", true);
+    $("action-dialog").close(); actionEditor = null;
+  }
+  function openFocusEditor(taskId) {
+    if (!canAct()) return;
+    const timer = data.activeTimer;
+    const choices = data.tasks.filter((t) => t.status === "open" && t.id !== timer?.taskId);
+    if (!choices.length) { openTaskEditor(); actionFeedback("Add an open task to start a focus session."); return; }
+    const selected = choices.some((t) => t.id === taskId) ? taskId : choices[0].id;
+    const options = choices.map((t) => '<option value="' + esc(t.id) + '"' + (t.id === selected ? ' selected' : '') + '>' + esc(t.title) + '</option>').join("");
+    const current = timer && data.tasks.find((t) => t.id === timer.taskId);
+    openActionEditor({ title: timer ? "Switch focus" : "Start focus", submit: timer ? "Save current and start" : "Start focus", action: "timer.start",
+      description: timer ? 'Your current session on “' + (current?.title || timer.taskId) + '” will be saved when the new session starts.' : "Choose a task. Your session keeps running when you close LifeOS.",
+      fields: field("Task", '<select name="taskId" required>' + options + '</select>') + field("Session note · optional", notesControl("note", "")),
+      input: (form) => ({ taskId: form.get("taskId"), note: String(form.get("note") || ""), expectedTimerRevision: timer?.revision ?? null }),
+    });
+  }
+  function openStopEditor(discard = false) {
+    const timer = data?.activeTimer;
+    if (!timer || !canAct()) return;
+    const task = data.tasks.find((t) => t.id === timer.taskId);
+    openActionEditor({ title: discard ? "Discard this session?" : "Save focus session", submit: discard ? "Discard session" : "Stop and save", action: discard ? "timer.cancel" : "timer.stop",
+      description: discard ? 'The running session on “' + (task?.title || timer.taskId) + '” will be removed without recording time.' : 'Timing “' + (task?.title || timer.taskId) + '” until you choose Stop and save.',
+      fields: discard ? "" : field("What did you work on? · optional", notesControl("note", timer.note)),
+      input: (form) => ({ expectedTimerRevision: timer.revision, ...(discard ? {} : { note: String(form.get("note") || "") }) }),
+    });
+  }
+  function openTaskEditor(taskId) {
+    const task = taskId ? data?.tasks.find((t) => t.id === taskId) : null;
+    if (!canAct() || (taskId && !task)) return;
+    const options = '<option value="">No project</option>' + data.projects.map((p) => '<option value="' + esc(p.id) + '"' + (p.id === task?.projectId ? ' selected' : '') + '>' + esc(p.name) + '</option>').join("");
+    openActionEditor({ title: task ? "Edit task" : "New task", submit: task ? "Save changes" : "Create task", action: task ? "task.update" : "task.create",
+      description: task ? "Update the task without changing its source links unless you edit its notes." : "Give this task a clear outcome. You can start a focus session on it next.",
+      fields: field("Title", inputControl("title", task?.title, 'required maxlength="500"')) + field("Project", '<select name="projectId">' + options + '</select>') + field("Notes · optional", notesControl("notes", task?.notes)),
+      input: (form) => {
+        const title = String(form.get("title") || "").trim();
+        if (!title) throw new Error("Give the task a title.");
+        const projectId = String(form.get("projectId") || "");
+        const notes = String(form.get("notes") || "");
+        return task ? { taskId: task.id, expectedRevision: task.revision, title, projectId: projectId || null, notes }
+          : { title, ...(projectId ? { projectId } : {}), notes };
+      },
+    });
+  }
+  function toggleTask(taskId) {
+    const task = data?.tasks.find((t) => t.id === taskId);
+    if (!task || !canAct()) return;
+    const completing = task.status === "open";
+    const timer = completing && data.activeTimer?.taskId === task.id ? data.activeTimer : null;
+    const title = timer ? "Stop and complete task" : completing ? "Complete task" : "Reopen task";
+    openActionEditor({ title, submit: title, action: "task.update", immediate: !timer,
+      description: timer ? 'The current session on “' + task.title + '” will be saved and the task marked complete.' : task.title,
+      input: () => ({ taskId: task.id, expectedRevision: task.revision, status: completing ? "done" : "open", ...(timer ? { expectedTimerRevision: timer.revision } : {}) }),
+    });
+  }
+  function openTimeEditor(entryId) {
+    const entry = entryId ? data?.entries.find((e) => e.id === entryId) : null;
+    if (!canAct() || (entryId && !entry)) return;
+    if (!data.tasks.length) { openTaskEditor(); actionFeedback("Create a task before recording time."); return; }
+    const end = entry?.end || new Date().toISOString();
+    const start = entry?.start || new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    const startValue = localInputValue(start), endValue = localInputValue(end);
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    openActionEditor({ title: entry ? "Edit time entry" : "Log time", submit: entry ? "Save time entry" : "Record time", action: entry ? "time.update" : "time.log",
+      description: "Dates and times use " + zone + ". This records a work session without changing your running focus timer.",
+      fields: field("Task", '<select name="taskId" required>' + taskOptions(entry?.taskId || data.activeTimer?.taskId) + '</select>') + '<div class="form-grid">' + field("Start", inputControl("start", startValue, 'type="datetime-local" step="1" required')) + field("End", inputControl("end", endValue, 'type="datetime-local" step="1" required')) + '</div>' + field("Work note · optional", notesControl("note", entry?.note)),
+      input: (form) => {
+        const startInput = String(form.get("start")), endInput = String(form.get("end"));
+        const from = entry && timeInputToIso(startInput) === timeInputToIso(startValue) ? entry.start : timeInputToIso(startInput);
+        const to = entry && timeInputToIso(endInput) === timeInputToIso(endValue) ? entry.end : timeInputToIso(endInput);
+        if (new Date(to) < new Date(from) || (!entry && new Date(to).getTime() === new Date(from).getTime())) throw new Error("End must be after start.");
+        return { ...(entry ? { entryId: entry.id, expectedRevision: entry.revision } : {}), taskId: form.get("taskId"), start: from, end: to, note: String(form.get("note") || "") };
+      },
+    });
+  }
+  async function submitAction(event) {
+    event.preventDefault();
+    const editor = actionEditor;
+    if (!editor || !canAct()) return;
+    const errorEl = $("action-error");
+    let dispatched = false;
+    try {
+      const input = editor.uncertain ? editor.request.body.input : editor.input(new FormData($("action-form")));
+      editor.request = actionRequest(editor.request, editor.action, input);
+      actionBusy = true; refreshActionControls();
+      errorEl.hidden = true; $("action-submit").textContent = "Saving…";
+      dispatched = true;
+      const res = await fetch("/api/actions", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(editor.request.body), cache: "no-store", signal: AbortSignal.timeout(20000) });
+      const receipt = await res.json();
+      if (!res.ok) {
+        if (res.status === 401) { authExpired = true; throw Object.assign(new Error("Your session expired. Sign in again, then retry this request."), { known: true }); }
+        const reason = actionErrorMessage(receipt.code || receipt.error, String(receipt.error || "The change could not be saved."));
+        const changed = res.status === 409 && !editor.action.startsWith("automation.") && editor.action !== "review.resolve";
+        const message = changed ? reason + " Your draft is preserved. Close this form and reopen it to use the latest version." : reason;
+        throw Object.assign(new Error(message), { known: res.status < 500 });
+      }
+      if (receipt.ok !== true || receipt.requestId !== editor.request.body.requestId) throw new Error("Invalid action receipt");
+      editor.uncertain = false;
+      $("action-dialog").close(); actionEditor = null;
+      actionFeedback(editor.action === "automation.run" ? "Queued. Follow progress in Today." : editor.action === "review.resolve" ? "Category saved. Gmail changes are queued; follow progress in Today." : "Saved. Your agents will see this change too.");
+      await refresh();
+      if (data?.capabilities?.automation) await refreshAutomation();
+      if (!dataAvailable) actionFeedback("Saved. Waiting for the latest dashboard data.");
+    } catch (error) {
+      editor.uncertain = dispatched && error.known !== true;
+      errorEl.textContent = editor.uncertain ? "The response could not be confirmed. Retry sends the same request safely; your form is locked until it is confirmed." : error.message;
+      errorEl.hidden = false;
+      if (!editor.uncertain && dispatched) { editor.request = null; await refresh(); }
+    } finally {
+      actionBusy = false;
+      if (actionEditor === editor) $("action-submit").textContent = editor.uncertain ? "Retry same request" : editor.submit;
+      refreshActionControls();
+    }
+  }
+
+  // ---- scheduled reviews and daily briefing ----
+  let automation = null;
+  let automationAvailable = false;
+  let automationSequence = 0;
+  const REVIEW_CATEGORIES = ["ACTION/NOW", "ACTION/SOON", "WAITING", "CALENDAR", "FINANCE/RECEIPT", "LEGAL/COMPLIANCE", "FYI/READ", "NEWSLETTER", "SPAM/SUSPECT"];
+  function reviewRationale(review) {
+    if (!review) return '';
+    return '<div class="review-context review-rationale"><strong>Claude review · ' + esc(review.category || 'No clear category') + '</strong><p class="rationale-text">' + esc(review.reason) + '</p><p>' + esc(review.model) + ' · ' + jobTime(review.createdAt) + '</p><p>This is a proposal. Choose the category you want to apply.</p></div>';
+  }
+  function decisionHistory(decisions, open) {
+    if (!Array.isArray(decisions) || !decisions.length) return '';
+    return '<details class="decision-history"' + (open ? ' open' : '') + '><summary>Recent classification decisions · ' + decisions.length + '</summary>' + decisions.slice(0, 20).map((decision) => '<div class="review-context review-rationale"><strong>' + esc(decision.category || 'No clear category') + ' · ' + esc(jobStatus(decision.state)) + '</strong><p>' + esc(decision.account) + '</p><p class="rationale-text">' + esc(decision.reason) + '</p><p>' + esc(decision.model) + ' · ' + jobTime(decision.createdAt) + '</p></div>').join('') + '</details>';
+  }
+  function renderAutomation() {
+    const supported = !!data?.capabilities?.automation;
+    $("automation-panel").hidden = !supported;
+    $("review-queue").hidden = !supported;
+    if (!supported) return;
+    if (!automation) {
+      $("automation-panel").innerHTML = '<h3>Daily workflow</h3><p class="mutetext">' + (automationAvailable ? 'Loading…' : 'Automation status is unavailable. Retrying automatically.') + '</p>';
+      return;
+    }
+    const schedule = automation.schedule;
+    const runs = Array.isArray(automation.runs) ? automation.runs : [];
+    const deliveries = Array.isArray(automation.deliveries) ? automation.deliveries : [];
+    const delivery = deliveries[0];
+    const latest = runs[0];
+    const historyOpen = $("automation-panel").querySelector(".job-history")?.open;
+    const decisionsOpen = $("automation-panel").querySelector(".decision-history")?.open;
+    const status = automation.paused ? "paused for maintenance" : !automation.configured ? "Workflow setup needed" : schedule.enabled ? "Daily workflow enabled" : "Daily workflow paused";
+    $("automation-panel").innerHTML = '<div class="operations-top"><div><h3>Daily workflow</h3><p>After Gmail triage · fallback ' + esc(schedule.localTime) + ' Eastern</p></div>' + jobBadge(status) + '</div>' +
+      (!automationAvailable ? '<p class="form-error">Status is stale. Reconnect before running an automation.</p>' : '') +
+      '<p class="automation-summary">' + (schedule.reviewEnabled ? 'Review held email' : 'Email review paused') + ' · ' + (schedule.briefEnabled ? 'Prepare and email the daily brief' : 'Daily brief paused') + '</p>' +
+      '<div class="section-actions"><button class="action-button" type="button" data-write-control data-automation-run="daily">Run daily workflow</button><button class="quiet-button" type="button" data-write-control data-automation-run="review">Run email review</button><button class="quiet-button" type="button" data-write-control data-automation-run="brief">Generate &amp; email brief</button><button class="text-button" type="button" data-write-control data-automation-settings>Schedule settings</button></div>' +
+      '<dl class="job-summary"><div><dt>Latest run</dt><dd>' + (latest ? jobBadge(latest.state) + ' · ' + esc(latest.kind) : 'No runs yet') + '</dd></div>' +
+      '<div><dt>Brief email</dt><dd>' + (delivery ? jobBadge(delivery.state) : 'No delivery yet') + '</dd></div>' +
+      '<div><dt>Next fallback</dt><dd>' + (schedule.enabled ? jobTime(schedule.nextRunAt) : 'Paused') + '</dd></div></dl>' +
+      (delivery ? '<p class="automation-detail">' + esc(delivery.day) + ' · ' + esc(delivery.recipient) + (delivery.sentAt ? ' · sent ' + jobTime(delivery.sentAt) : '') + (delivery.state === 'uncertain' ? ' · Delivery is being checked before another send is attempted.' : '') + '</p>' : '') +
+      (latest ? '<p class="automation-detail">' + count(latest.reviewed) + ' reviewed · ' + count(latest.applied) + ' applied · ' + count(latest.held) + ' held for you · ' + count(latest.failed) + ' failed' + (latest.nextAttemptAt ? ' · next attempt ' + jobTime(latest.nextAttemptAt) : '') + (latest.errorCode ? ' · ' + esc(actionErrorMessage(latest.errorCode)) : '') + '</p>' : '') +
+      (runs.length ? '<details class="job-history"' + (historyOpen ? ' open' : '') + '><summary>Workflow history · ' + runs.length + '</summary><div class="automation-history">' + runs.slice(0, 12).map((run) => '<div class="automation-history-row"><span>' + esc(run.kind) + '<small>' + jobTime(run.startedAt || run.createdAt) + '</small></span>' + jobBadge(run.state) + '<span>' + count(run.applied) + ' applied · ' + count(run.held) + ' held</span></div>').join('') + '</div></details>' : '') + decisionHistory(automation.recentDecisions, decisionsOpen);
+    const reviews = (automation.reviews || []).filter((item) => !item.resolvedAt);
+    $("review-queue").innerHTML = '<div class="portfolio-heading"><div><h2>Decisions for you</h2><p class="mutetext">Held messages stay in your inbox until a category is resolved.</p></div><span class="chip">' + reviews.length + ' pending</span></div>' +
+      (reviews.length ? '<div class="review-list panel">' + reviews.map((item) => '<article class="review-row"><div><h3>' + esc(item.subject || '(No subject)') + '</h3><p>' + esc(item.sender) + ' · ' + esc(item.account) + '</p><p class="review-reason">' + esc(jobStatus(item.reason)) + (item.category ? ' · suggested ' + esc(item.category) : '') + '</p></div><button class="quiet-button" type="button" data-write-control data-review-item="' + esc(item.id) + '"' + (item.reviewable === false ? ' data-review-unavailable' : '') + '>' + (item.reviewable === false ? 'Not actionable' : 'Review classification') + '</button></article>').join('') + '</div>' : '<p class="mutetext">No decisions are waiting for your review.</p>');
+    refreshActionControls();
+  }
+  async function refreshAutomation() {
+    if (!data?.capabilities?.automation) { renderAutomation(); return; }
+    const sequence = ++automationSequence;
+    try {
+      const res = await fetch('/api/automation', { cache: 'no-store' });
+      if (sequence === automationSequence && res.status === 401) authExpired = true;
+      if (!res.ok) throw new Error('Automation unavailable');
+      const snapshot = await res.json();
+      if (!snapshot.schedule || !Array.isArray(snapshot.runs) || !Array.isArray(snapshot.reviews)) throw new Error('Invalid automation status');
+      if (sequence !== automationSequence) return;
+      automation = snapshot; automationAvailable = true;
+    } catch {
+      if (sequence !== automationSequence) return;
+      automationAvailable = false;
+    }
+    renderAutomation(); renderToday(); refreshActionControls();
+  }
+  function openAutomationRun(kind) {
+    if (!automationAvailable || !automation?.configured || automation.paused) return;
+    const labels = { daily: 'Run daily workflow', review: 'Run email review', brief: 'Generate & email brief' };
+    if (!Object.hasOwn(labels, kind)) return;
+    const description = kind === 'review' ? 'Claude will review eligible held Gmail conversations. Clear decisions can apply the permitted labels and archive actions; ambiguous messages stay for you.'
+      : kind === 'brief' ? 'Create today’s briefing and email it to your configured address. An existing briefing or delivery for today is reused so it is not sent twice.'
+      : 'Run the enabled email-review and daily-brief stages. The brief is emailed to your configured address; today’s existing delivery is reused.';
+    openActionEditor({ title: labels[kind], description, submit: labels[kind], action: 'automation.run', input: () => ({ kind }) });
+  }
+  function openScheduleEditor() {
+    if (!automationAvailable || !automation || automation.paused) return;
+    const schedule = automation.schedule;
+    const checkbox = (name, checked, label) => '<label class="form-check"><input type="checkbox" name="' + name + '"' + (checked ? ' checked' : '') + '><span>' + esc(label) + '</span></label>';
+    openActionEditor({ title: 'Daily workflow settings', description: 'The workflow follows scheduled Gmail triage. The Eastern fallback time starts it if the triage handoff was missed. Manual runs remain available when the schedule is paused.', submit: 'Save schedule', action: 'automation.schedule',
+      fields: checkbox('enabled', schedule.enabled, 'Enable the daily workflow') + field('Fallback time · Eastern', inputControl('localTime', schedule.localTime || '07:00', 'type="time" required')) + checkbox('reviewEnabled', schedule.reviewEnabled, 'Review held email with Claude') + checkbox('briefEnabled', schedule.briefEnabled, 'Prepare and email the daily brief'),
+      input: (form) => ({ enabled: form.has('enabled'), localTime: String(form.get('localTime')), reviewEnabled: form.has('reviewEnabled'), briefEnabled: form.has('briefEnabled') }),
+    });
+  }
+  function openReviewEditor(itemId) {
+    const item = automation?.reviews?.find((candidate) => candidate.id === itemId && !candidate.resolvedAt);
+    if (!item || item.reviewable === false || !automationAvailable || automation.paused) return;
+    const source = 'https://mail.google.com/mail/u/?authuser=' + encodeURIComponent(item.account) + '#all/' + encodeURIComponent(item.threadId);
+    const suggested = item.agentReview?.category || item.category;
+    const options = '<option value="" disabled' + (REVIEW_CATEGORIES.includes(suggested) ? '' : ' selected') + '>Choose a category</option>' + REVIEW_CATEGORIES.map((category) => '<option value="' + esc(category) + '"' + (category === suggested ? ' selected' : '') + '>' + esc(category) + '</option>').join('');
+    openActionEditor({ title: 'Review email category', description: 'Your choice queues the permitted Gmail labels and archive actions for this conversation. Action categories can also create follow-up tasks.', submit: 'Apply this category', action: 'review.resolve',
+      fields: '<div class="review-context"><strong>' + esc(item.subject || '(No subject)') + '</strong><p>' + esc(item.sender) + '</p><p>' + esc(item.account) + '</p><p>' + esc(jobStatus(item.reason)) + '</p><a href="' + esc(source) + '" target="_blank" rel="noopener noreferrer">Open conversation in Gmail</a></div>' + reviewRationale(item.agentReview) + field('Category', '<select name="category" required>' + options + '</select>'),
+      input: (form) => ({ itemId: item.id, category: String(form.get('category')) }),
+    });
+  }
+
   // ---- tab routing ----
   const TABS = ["time", "today", "tasks", "triage"];
   function currentTab() {
@@ -1064,11 +1464,41 @@ export const PORTAL_HTML = `<!doctype html>
   $("tasktable").addEventListener("click", (event) => {
     const button = event.target.closest("[data-task-notes-id]");
     if (button) openTaskNotesDialog(button.dataset.taskNotesId);
+    const edit = event.target.closest("[data-task-edit]"); if (edit) openTaskEditor(edit.dataset.taskEdit);
+    const toggle = event.target.closest("[data-task-toggle]"); if (toggle) toggleTask(toggle.dataset.taskToggle);
+    const focus = event.target.closest("[data-task-focus]"); if (focus) openFocusEditor(focus.dataset.taskFocus);
   });
   $("today-briefing").addEventListener("click", (event) => {
     if (event.target.closest("#briefing-full-button")) openBriefingDialog();
   });
   $("recent-time-button").addEventListener("click", openRecentTimeDialog);
+  $("focus-controls").addEventListener("click", (event) => {
+    const action = event.target.closest("[data-focus-action]")?.dataset.focusAction;
+    if (action === "start") openFocusEditor();
+    if (action === "stop") openStopEditor();
+    if (action === "cancel") openStopEditor(true);
+  });
+  $("automation-panel").addEventListener("click", (event) => {
+    const run = event.target.closest("[data-automation-run]"); if (run) openAutomationRun(run.dataset.automationRun);
+    if (event.target.closest("[data-automation-settings]")) openScheduleEditor();
+  });
+  $("review-queue").addEventListener("click", (event) => {
+    const item = event.target.closest("[data-review-item]"); if (item) openReviewEditor(item.dataset.reviewItem);
+  });
+  $("new-task-button").addEventListener("click", () => openTaskEditor());
+  $("log-time-button").addEventListener("click", () => openTimeEditor());
+  $("dialog-body").addEventListener("click", (event) => {
+    const edit = event.target.closest("[data-entry-edit]"); if (edit) openTimeEditor(edit.dataset.entryEdit);
+    if (event.target.closest("[data-log-time]")) openTimeEditor();
+  });
+  $("action-form").addEventListener("submit", submitAction);
+  $("action-close").addEventListener("click", closeActionEditor);
+  $("action-cancel").addEventListener("click", closeActionEditor);
+  $("action-dialog").addEventListener("cancel", (event) => { event.preventDefault(); closeActionEditor(); });
+  $("refresh-connection").addEventListener("click", () => refresh());
+  $("action-refresh-session").addEventListener("click", () => refresh());
+  window.addEventListener("online", () => refresh());
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) { refresh(); refreshJobs(); } });
   $("dialog-close").addEventListener("click", () => $("detail-dialog").close());
   $("detail-dialog").addEventListener("click", (event) => {
     if (event.target === $("detail-dialog")) $("detail-dialog").close();
@@ -1081,18 +1511,24 @@ export const PORTAL_HTML = `<!doctype html>
   }
 
   async function refresh() {
+    const sequence = ++refreshSequence;
     try {
       const res = await fetch("/api/data", { cache: "no-store" });
+      if (sequence === refreshSequence && res.status === 401) authExpired = true;
       if (!res.ok) throw new Error("Data unavailable");
       const payload = await res.json();
       if (!Array.isArray(payload.tasks) || !Array.isArray(payload.entries) || !Array.isArray(payload.projects) || !Array.isArray(payload.products)) throw new Error("Invalid data");
+      if (sequence !== refreshSequence) return;
       data = payload;
       dataAvailable = true;
+      authExpired = false;
       render(); tick(); renderConnection();
+      void refreshAutomation();
     } catch {
+      if (sequence !== refreshSequence) return;
       dataAvailable = false;
       renderConnection();
-    }
+    } finally { refreshActionControls(); }
   }
   showTab();
   refresh();

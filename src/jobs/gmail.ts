@@ -1,7 +1,7 @@
 import type { LifeOsConfig } from "../core/config.js";
 import type { Logger } from "../core/logger.js";
 import { GmailAccountManager, type GmailManagerLike } from "../toolsets/gmail/client.js";
-import { parseMessage } from "../toolsets/gmail/mime.js";
+import { getHeader, parseMessage } from "../toolsets/gmail/mime.js";
 import { CATEGORIES, type MailGateway, type MailThread, type MutationPlan } from "./types.js";
 
 export class GmailJobGateway implements MailGateway {
@@ -67,7 +67,7 @@ export class GmailJobGateway implements MailGateway {
       return { id, messages: (result.data.messages ?? []).map((message) => {
         const parsed = parseMessage(message, { includeBody: true, maxBodyChars: 12_000 });
         if (!message.id || !message.internalDate || !Number.isFinite(Number(message.internalDate))) throw new Error("GMAIL_INVALID_MESSAGE");
-        return { id: message.id, internalDate: Number(message.internalDate), labels: [...(message.labelIds ?? [])].sort(), from: parsed.from ?? "", to: parsed.to ?? "", subject: parsed.subject ?? "", body: parsed.body ?? "", truncated: !!parsed.bodyTruncated, attachments: !!parsed.attachments?.length };
+        return { id: message.id, internalDate: Number(message.internalDate), labels: [...(message.labelIds ?? [])].sort(), from: parsed.from ?? "", to: parsed.to ?? "", subject: parsed.subject ?? "", body: parsed.body ?? "", truncated: !!parsed.bodyTruncated, attachments: !!parsed.attachments?.length, rfcMessageId: getHeader(message.payload?.headers, "Message-ID") };
       }).sort((a, b) => a.internalDate - b.internalDate || a.id.localeCompare(b.id)) };
     }, { readOnly: true });
   }

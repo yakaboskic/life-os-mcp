@@ -71,7 +71,7 @@ export function registryTools(): ToolDefinition<any>[] {
       inputSchema: {
         task: z.string().describe("Task id (t1, t2, …) or unique name fragment."),
         title: z.string().optional(),
-        project: z.string().optional().describe("Move to this project (id or name)."),
+        project: z.string().nullable().optional().describe("Move to this project (id or name), or null to detach it."),
         status: z.enum(["open", "done"]).optional(),
         notes: z.string().optional(),
       },

@@ -4,6 +4,7 @@ import { createDaemon } from "../runtime/daemon.js";
 import { requestBackend } from "../runtime/client.js";
 import { readFileSync } from "node:fs";
 import { createPrivateWebBridge } from "../runtime/web-bridge.js";
+import { randomUUID } from "node:crypto";
 
 export async function daemon():Promise<void> {
   process.env.TZ ??= "America/New_York";
@@ -15,7 +16,7 @@ export async function daemon():Promise<void> {
   let bridge:ReturnType<typeof createPrivateWebBridge>|undefined;
   if(config.env.LIFE_OS_PRIVATE_WEB_HOST) {
     const token=readFileSync(config.env.LIFE_OS_GATEWAY_TOKEN_FILE!,"utf8").trim();
-    bridge=createPrivateWebBridge(token,config.env.LIFE_OS_PRIVATE_WEB_HOST,Number(config.env.LIFE_OS_WEB_PORT??4747));
+    bridge=createPrivateWebBridge(token,config.env.LIFE_OS_PRIVATE_WEB_HOST,Number(config.env.LIFE_OS_WEB_PORT??4747),{executeAction:app.executeAction});
     await new Promise<void>((resolve,reject)=>{bridge!.once("error",reject);bridge!.listen(4749,config.env.LIFE_OS_PRIVATE_WEB_HOST,resolve);});
   }
   logger.info("LifeOS daemon ready",{apiPort:config.env.LIFE_OS_API_PORT??4748,webPort:config.env.LIFE_OS_WEB_PORT??4747});
@@ -53,4 +54,20 @@ export async function jobsCommand(subcommand:string|undefined,args:string[],opti
     await new Promise(resolve=>setTimeout(resolve,2000));
   }
   throw new Error("Job wait timed out; inspect jobs status before retrying");
+}
+
+export async function automationCommand(subcommand:string|undefined,args:string[],options:{time?:string;enable?:boolean;disable?:boolean;requestId?:string}) {
+  if(subcommand==="status") {console.log(JSON.stringify(await requestBackend("/v1/automation"),null,2));return;}
+  let action:string,input:Record<string,unknown>;
+  if(subcommand==="run" && ["review","brief","daily"].includes(args[0]??"")) {
+    action="automation.run";input={kind:args[0]};
+  } else if(subcommand==="schedule") {
+    if(options.enable && options.disable) throw new Error("Choose --enable or --disable, not both.");
+    if(!options.time && !options.enable && !options.disable) throw new Error("Use --time HH:MM (Eastern), --enable or --disable.");
+    action="automation.schedule";input={...(options.time?{localTime:options.time}:{}),...(options.enable?{enabled:true}:{}),...(options.disable?{enabled:false}:{})};
+  } else throw new Error("Usage: life-os automation status | run review|brief|daily | schedule --time HH:MM --enable|--disable");
+  // Keep this ID to retry exactly the same command if the response is lost.
+  const requestId=options.requestId??randomUUID();
+  console.error(`LifeOS request ID: ${requestId}`);
+  console.log(JSON.stringify(await requestBackend("/v1/actions",{method:"POST",body:{requestId,action,input}}),null,2));
 }

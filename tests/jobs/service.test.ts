@@ -201,3 +201,30 @@ describe("Eastern schedule", () => {
     expect(easternDay(new Date("2026-10-18T01:00:00Z"))).toBe("2026-10-17");
   });
 });
+
+describe("bounded agent review integration", () => {
+  it("accepts grounded Claude evidence with its own actor and applies only approved captured work", async () => {
+    const f = fixture({ classify: async () => decision("NEWSLETTER", 0.4) }); f.mail.add("held1"); await f.service.start({ mode: "apply" });
+    const review = f.service.reviews()[0]!, context = await f.service.reviewContext!(review.id, new AbortController().signal);
+    await f.service.acceptAgentReview!({ itemId: review.id, revision: context.revision, policyVersion: context.policyVersion, category: "ACTION/NOW", clear: true, confidence: 0.98, needsMoreContext: false, reason: "Explicit review request due today", evidence: [{ messageId: "m1", quote: "Please review and approve the attached proposal today." }] }, "claude-sonnet-5-5", new AbortController().signal);
+    const stored = new JobStore(openDatabase(f.config)).work(review.id)!; expect(stored.decision?.reviewed).toBeUndefined(); expect(stored.decision?.agentReview?.actor).toBe("claude"); expect(stored.decision?.confidence).toBe(0.98);
+    f.mail.add("new-unreviewed", [message("m2")]); const applied = await f.service.applyReviewed!([review.id]);
+    expect(applied.reviewedIds).toEqual([review.id]); expect(f.mail.mutations).toHaveLength(1); expect(f.mail.mutations[0]?.ids).toEqual(["m1"]); expect(f.mail.data.get("new-unreviewed")!.messages[0]!.labels).toContain("INBOX"); expect(f.mail.data.get("held1")!.messages[0]!.labels).toContain("UNREAD");
+  });
+  it("rejects invented quotes, dry-run reviews, changed context and uncertain mutation plans", async () => {
+    const f = fixture({ classify: async () => decision("NEWSLETTER", 0.4) }); f.mail.add("held1"); await f.service.start({ mode: "dry-run" });
+    const shadow = f.service.reviews()[0]!; expect(shadow.mode).toBe("dry-run"); expect(shadow.reviewable).toBe(false); await expect(f.service.reviewContext!(shadow.id, new AbortController().signal)).rejects.toThrow("REVIEW_NOT_ELIGIBLE");
+    await f.service.start({ mode: "apply" }); const review = f.service.reviews().find(item => item.mode === "apply")!, context = await f.service.reviewContext!(review.id, new AbortController().signal);
+    const proposal = { itemId: review.id, revision: context.revision, policyVersion: context.policyVersion, category: "ACTION/NOW" as const, clear: true, confidence: 0.99, needsMoreContext: false, reason: "Request", evidence: [{ messageId: "m1", quote: "Completely invented evidence that was never written." }] };
+    await expect(f.service.acceptAgentReview!(proposal, "claude-sonnet-5-5", new AbortController().signal)).rejects.toThrow("REVIEW_INVALID_EVIDENCE");
+    f.mail.data.get("held1")!.messages[0]!.labels.push("STARRED"); await expect(f.service.reviewContext!(review.id, new AbortController().signal)).rejects.toThrow("REVIEW_EVIDENCE_CHANGED"); expect(f.mail.mutations).toHaveLength(0);
+  });
+  it("excludes owned generated messages but still handles unrelated inbound mail sharing their thread", async () => {
+    const f = fixture(); const db = openDatabase(f.config);
+    db.prepare("INSERT INTO owned_generated_messages VALUES(?,?,?)").run(account, "<brief@test>", "generated1");
+    f.mail.add("self-brief", [message("generated1", { rfcMessageId: "<brief@test>" })]);
+    f.mail.add("mixed", [message("generated1", { rfcMessageId: "<brief@test>" }), message("m2")]);
+    await f.service.start({ mode: "apply" }); expect(f.mail.mutations).toHaveLength(1); expect(f.mail.mutations[0]?.ids).toEqual(["m2"]);
+    expect(f.mail.data.get("self-brief")!.messages[0]!.labels).toContain("INBOX");
+  });
+});

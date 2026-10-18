@@ -10,7 +10,7 @@ import { TrackStore } from "../toolsets/track/store.js";
 import { GmailJobGateway } from "./gmail.js";
 import { CATEGORY_CRITERIA, JevClassifier } from "./jev.js";
 import { JobStore, type WorkItem } from "./store.js";
-import { ACTIVE_CATEGORIES, CATEGORIES, RUBRIC_VERSION, TIME_ZONE, type AccountResult, type Category, type Classifier, type JobRun, type JobService, type JobStatus, type MailGateway, type MailMessage, type MailThread, type MutationPlan, type ReviewItem, type StartJobInput } from "./types.js";
+import { ACTIVE_CATEGORIES, CATEGORIES, RUBRIC_VERSION, TIME_ZONE, type AgentReviewContext, type AgentReviewProposal, type AccountResult, type Category, type Classifier, type JobRun, type JobService, type JobStatus, type MailGateway, type MailMessage, type MailThread, type MutationPlan, type ReviewItem, type StartJobInput } from "./types.js";
 
 export type { JobService, JobRun, JobStatus, ReviewItem, StartJobInput } from "./types.js";
 export interface JobDependencies { gateway?: MailGateway; classifier?: Classifier; now?: () => Date; deadlineMs?: number }
@@ -88,6 +88,40 @@ class GmailTriageService implements JobService {
     if (this.active || this.paused) throw new Error("JOBS_BUSY");
     return this.store.resolve(id, category);
   }
+  private async readThread(account: string, id: string, signal: AbortSignal): Promise<MailThread> {
+    const thread = await this.gateway.thread(account, id, signal);
+    return { ...thread, messages: thread.messages.filter(message => !this.store.isOwnedMessage(account, message.id, message.rfcMessageId)) };
+  }
+  async reviewContext(id: string, signal: AbortSignal): Promise<AgentReviewContext> {
+    if (this.active || this.paused) throw new Error("JOBS_BUSY");
+    const work = this.store.work(id); const review = this.reviews().find(item => item.id === id);
+    if (!work || !review?.reviewable || !this.gateway.accounts().includes(work.account)) throw new Error("REVIEW_NOT_ELIGIBLE");
+    await this.gateway.verify(work.account, signal);
+    const labels = await this.gateway.labels(work.account, false, signal);
+    const thread = await this.readThread(work.account, work.threadId, signal);
+    if (revision(thread) !== work.revision || work.labelRevision !== hash(thread.messages.map(message => [message.id, relevantLabels(message.labels, labels)]))) throw new Error("REVIEW_EVIDENCE_CHANGED");
+    const messages = eligible(thread);
+    if (!messages.length || messages.length > 50 || messages.some(message => message.truncated) || messages.reduce((sum, message) => sum + message.body.length, 0) > 60_000 || messages.filter(incoming).some(message => !message.body.trim())) throw new Error("REVIEW_INCOMPLETE_CONTEXT");
+    return { itemId: id, revision: work.revision, policyVersion: "lifeos-review-v1", account: work.account, now: this.now().toISOString(), thread, triggerIds: work.triggerIds, proposedCategory: work.decision?.category };
+  }
+  async acceptAgentReview(proposal: AgentReviewProposal, model: string, signal: AbortSignal): Promise<ReviewItem> {
+    const context = await this.reviewContext(proposal.itemId, signal);
+    if (proposal.revision !== context.revision || proposal.policyVersion !== context.policyVersion || !proposal.clear || proposal.needsMoreContext || !Number.isFinite(proposal.confidence) || proposal.confidence < 0.95 || proposal.confidence > 1 || !proposal.category || !CATEGORIES.includes(proposal.category)) throw new Error("REVIEW_NOT_CLEAR");
+    if (!proposal.reason.trim() || proposal.reason.length > 600 || proposal.evidence.length < 1 || proposal.evidence.length > 3 || !model.startsWith("claude-")) throw new Error("REVIEW_INVALID_EVIDENCE");
+    const normalize = (value: string) => value.replace(/\s+/g, " ").trim();
+    if (!proposal.evidence.some(evidence => context.triggerIds.includes(evidence.messageId)) || proposal.evidence.some(evidence => {
+      const message = context.thread.messages.find(item => item.id === evidence.messageId && incoming(item));
+      return !message || evidence.quote.length < 12 || evidence.quote.length > 240 || !normalize(message.body).includes(normalize(evidence.quote));
+    })) throw new Error("REVIEW_INVALID_EVIDENCE");
+    if (this.active || this.paused) throw new Error("JOBS_BUSY");
+    return this.store.acceptAgent(proposal.itemId, { category: proposal.category, confidence: proposal.confidence, probabilities: {} as Record<Category, number>, model, agentReview: { policyVersion: proposal.policyVersion, revision: proposal.revision, reason: proposal.reason, evidence: proposal.evidence, actor: "claude" } });
+  }
+  applyReviewed(ids: string[], signal?: AbortSignal): Promise<JobRun> {
+    if (!ids.length || ids.length > 100 || ids.some(id => typeof id !== "string")) return Promise.reject(new Error("INVALID_REVIEW_IDS"));
+    return this.start({ mode: "apply", reviewedIds: [...new Set(ids)], signal });
+  }
+  readyReviewIds(): string[] { return this.gateway.accounts().flatMap(account => this.store.works(account, "apply").filter(work => work.kind === "classify" && (work.decision?.reviewed || work.decision?.agentReview) && ["classified", "applying"].includes(work.state)).map(work => work.id)); }
+  reviewedWorkState(id: string): string | undefined { return this.store.work(id)?.state; }
   status(): JobStatus {
     const history = this.store.history(1000);
     return { activeRun: this.active, lastRun: history[0] ?? null, lastSuccessfulRun: history.find((run) => run.state === "success" && run.mode === "apply") ?? null, nextRunAt: nextRunAt(this.now()), schedule: "05:53 daily", timeZone: TIME_ZONE, accounts: (this.active ?? history[0])?.accounts ?? [], reviewCount: this.reviews().length, paused: this.paused, configuredAccounts: this.gateway.accounts() };
@@ -98,6 +132,7 @@ class GmailTriageService implements JobService {
     if (!["apply", "dry-run"].includes(input.mode)) return Promise.reject(new Error("INVALID_RUN_MODE"));
     if (input.mode === "apply" && this.config.env.LIFE_OS_TRIAGE_APPLY_ENABLED !== "true") return Promise.reject(new Error("TRIAGE_APPLY_DISABLED"));
     if (this.paused) return Promise.reject(new Error("JOBS_DRAINING"));
+    if (this.running && input.reviewedIds) return Promise.reject(new Error("JOB_ALREADY_RUNNING"));
     if (this.running) return this.active?.mode === input.mode ? this.running : Promise.reject(new Error("JOB_ALREADY_RUNNING"));
     const now = this.now();
     const day = easternDay(now);
@@ -108,17 +143,18 @@ class GmailTriageService implements JobService {
     if (run) {
       run.state = "running"; delete run.finishedAt; delete run.errorCode; run.accounts = []; this.store.saveRun(run);
     } else {
-      run = { id: randomUUID(), name: "gmail-triage", mode: input.mode, scheduled: !!input.scheduled, day, state: "running", startedAt: now.toISOString(), accounts: [] };
+      run = { id: randomUUID(), name: "gmail-triage", mode: input.mode, scheduled: !!input.scheduled, day, state: "running", startedAt: now.toISOString(), accounts: [], ...(input.reviewedIds ? { reviewedIds: input.reviewedIds } : {}) };
       this.store.insertRun(run, key);
     }
     this.active = run;
-    this.running = this.execute(run).finally(() => { this.active = null; this.running = null; });
+    this.running = this.execute(run, run.reviewedIds, input.signal).finally(() => { this.active = null; this.running = null; });
     return this.running;
   }
-  private async execute(run: JobRun): Promise<JobRun> {
-    const signal = AbortSignal.timeout(this.deadlineMs);
+  private async execute(run: JobRun, reviewedIds?: string[], externalSignal?: AbortSignal): Promise<JobRun> {
+    const deadline = AbortSignal.timeout(this.deadlineMs);
+    const signal = externalSignal ? AbortSignal.any([deadline, externalSignal]) : deadline;
     try {
-      const accounts = this.gateway.accounts();
+      const accounts = this.gateway.accounts().filter(account => !reviewedIds || reviewedIds.some(id => this.store.work(id)?.account === account));
       if (!accounts.length) throw new Error("NO_GMAIL_ACCOUNTS");
       for (const account of accounts) {
         signal.throwIfAborted();
@@ -130,7 +166,12 @@ class GmailTriageService implements JobService {
         try {
           await this.gateway.verify(account, signal);
           const labels = await this.gateway.labels(account, run.mode === "apply", signal);
-          await this.account(run, result, labels, signal);
+          if (reviewedIds) {
+            for (const id of reviewedIds) {
+              const work = this.store.work(id);
+              if (work?.account === account && work.mode === "apply" && work.kind === "classify" && (work.decision?.reviewed || work.decision?.agentReview) && ["classified", "applying"].includes(work.state)) await this.process(work, labels, result, signal, undefined, false);
+            }
+          } else await this.account(run, result, labels, signal);
           result.held = this.store.reviews().filter((item) => item.account === account && this.store.work(item.id)?.mode === run.mode).length;
           result.state = result.failed || result.held ? "partial" : "success";
           if (run.mode === "apply" && result.failed === 0) result.lastSucceededAt = this.now().toISOString();
@@ -174,7 +215,7 @@ class GmailTriageService implements JobService {
       signal.throwIfAborted();
       if (accepted >= 100) break;
       try {
-        const thread = await this.gateway.thread(result.account, threadId, signal);
+        const thread = await this.readThread(result.account, threadId, signal);
         const triggers = eligible(thread).filter((message) => incoming(message) && message.labels.includes("INBOX"));
         if (!triggers.length) continue;
         const latest = triggers.at(-1)!;
@@ -191,9 +232,9 @@ class GmailTriageService implements JobService {
       }
     }
   }
-  private async process(work: WorkItem, labels: Record<string, string>, result: AccountResult, signal: AbortSignal, loaded?: MailThread): Promise<void> {
+  private async process(work: WorkItem, labels: Record<string, string>, result: AccountResult, signal: AbortSignal, loaded?: MailThread, followups = true): Promise<void> {
     try {
-      let thread = loaded ?? await this.gateway.thread(work.account, work.threadId, signal);
+      let thread = loaded ?? await this.readThread(work.account, work.threadId, signal);
       if (work.plan && work.state === "applying") {
         if (this.applied(work.plan, thread, labels)) { this.finalize(work); result.processed++; return; }
         // Even unchanged labels can reflect a user undoing a successful write. Never blindly replay.
@@ -217,7 +258,7 @@ class GmailTriageService implements JobService {
       }
       if (!work.plan) throw new Error("MUTATION_PLAN_MISSING");
       this.store.saveWork(work);
-      thread = await this.gateway.thread(work.account, work.threadId, signal);
+      thread = await this.readThread(work.account, work.threadId, signal);
       if (!this.unchanged(work.plan, thread, labels) || revision(thread) !== work.revision) {
         this.store.review(work, "MAIL_CHANGED_BEFORE_APPLY"); result.held++; return;
       }
@@ -230,10 +271,10 @@ class GmailTriageService implements JobService {
         // Leave applying durable. Reconciliation on next run decides whether Gmail committed it.
         this.store.attemptOutcome(attempt, "uncertain"); throw error;
       }
-      const after = await this.gateway.thread(work.account, work.threadId, signal);
+      const after = await this.readThread(work.account, work.threadId, signal);
       if (!this.applied(work.plan, after, labels)) { this.store.review(work, "GMAIL_POSTCONDITION_CHANGED"); result.held++; return; }
       this.finalize(work); result.processed++; if (work.kind === "complete") result.completed++;
-      if (work.kind === "classify" && work.decision && ACTION_CATEGORIES.has(work.decision.category)) await this.supersedeOlder(work, labels, result, signal);
+      if (followups && work.kind === "classify" && work.decision && ACTION_CATEGORIES.has(work.decision.category)) await this.supersedeOlder(work, labels, result, signal);
     } catch (error) {
       if (!["applying", "applied", "needs_review"].includes(work.state)) { work.state = "retryable"; work.reason = errorCode(error); this.store.saveWork(work); }
       if (error instanceof AuthError || signal.aborted) throw error;
@@ -286,7 +327,7 @@ class GmailTriageService implements JobService {
     const ids = await this.gateway.listThreads(result.account, query, signal);
     for (const id of ids) {
       signal.throwIfAborted();
-      const thread = await this.gateway.thread(result.account, id, signal);
+      const thread = await this.readThread(result.account, id, signal);
       const messages = eligible(thread);
       // Gmail search is message-level. Recheck every message, including stars on a different message.
       if (!messages.length || messages.some((message) => message.labels.includes("STARRED") || (incoming(message) && message.labels.includes("INBOX"))) || !messages.some((message) => ACTIVE_CATEGORIES.some((category) => message.labels.includes(labels[category] ?? "")))) continue;
@@ -299,7 +340,7 @@ class GmailTriageService implements JobService {
   }
   private async closeRepliedTasks(account: string, signal: AbortSignal): Promise<void> {
     for (const link of this.store.links(account).filter((item) => item.active)) {
-      const thread = await this.gateway.thread(account, link.threadId, signal);
+      const thread = await this.readThread(account, link.threadId, signal);
       const trigger = { internalDate: link.triggerDate, id: [...link.triggerIds].sort().at(-1) ?? "" };
       const sent = eligible(thread).filter((message) => message.labels.includes("SENT") && newer(message, trigger)).at(-1);
       if (!sent || eligible(thread).some((message) => incoming(message) && newer(message, sent))) continue;
@@ -323,7 +364,7 @@ class GmailTriageService implements JobService {
     for (const candidate of candidates) {
       if (existing.some((link) => link.threadId === candidate.threadId || link.taskId === candidate.task.id) || candidates.filter((item) => item.threadId === candidate.threadId).length !== 1) continue;
       signal.throwIfAborted();
-      const thread = await this.gateway.thread(account, candidate.threadId, signal);
+      const thread = await this.readThread(account, candidate.threadId, signal);
       const inbound = eligible(thread).filter(incoming);
       const latest = inbound.at(-1);
       if (!latest) continue;
@@ -334,7 +375,7 @@ class GmailTriageService implements JobService {
   private async supersedeOlder(current: WorkItem, labels: Record<string, string>, result: AccountResult, signal: AbortSignal): Promise<void> {
     const links = this.store.links(current.account).filter((link) => link.threadId !== current.threadId && link.sender === current.sender && link.subject === normalizeSubject(current.subject) && link.triggerDate < current.triggerDate);
     for (const link of links) {
-      const thread = await this.gateway.thread(current.account, link.threadId, signal);
+      const thread = await this.readThread(current.account, link.threadId, signal);
       if (eligible(thread).some((message) => incoming(message) && message.internalDate > current.triggerDate)) continue;
       const key = hash(["supersede", link.workId, current.id]);
       if (this.store.workByKey(key)) continue;

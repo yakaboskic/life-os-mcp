@@ -22,13 +22,13 @@ test('rejects missing credentials, browser origins, writes and nonallowlisted pa
 test('forwards only an authenticated readonly request and never caches its JSON', async t => {
   const calls = [];
   const base = await fixture(t, async (url, options) => { calls.push({ url, options }); return new Response('{"value":3}', { headers: { 'content-type': 'application/json' } }); });
-  for (const path of ['/api/data', '/api/triage', '/api/jobs']) {
+  for (const path of ['/api/data', '/api/triage', '/api/jobs', '/api/automation']) {
     const response = await fetch(base + path, { headers: { authorization: 'Bearer ' + token } });
     assert.equal(response.status, 200);
-    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.equal(response.headers.get('cache-control'), 'private, no-store');
     assert.deepEqual(await response.json(), { value: 3 });
   }
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 4);
   assert.equal(calls[0].url.href, upstream + '/api/data');
   assert.equal(calls[0].options.method, 'GET');
   assert.equal(calls[0].options.redirect, 'error');
@@ -50,4 +50,41 @@ test('normalizes the trailing newline in an injected Secret Manager credential',
     return new Response('{}', { headers: { 'content-type': 'application/json' } });
   }, token + '\n');
   assert.equal((await fetch(base + '/api/data', { headers: { authorization: 'Bearer ' + token } })).status, 200);
+});
+
+test('forwards bounded authenticated actions with only the validated actor and preserves conflict status', async t => {
+  const body = JSON.stringify({ requestId: 'r1', action: 'task.update', input: {} });
+  const base = await fixture(t, async (url, options) => {
+    assert.equal(url.href, upstream + '/api/actions'); assert.equal(options.method, 'POST'); assert.equal(options.body, body);
+    assert.deepEqual(options.headers, { authorization: 'Bearer ' + token, accept: 'application/json', 'content-type': 'application/json', 'x-life-os-actor': 'owner@example.com' });
+    return Response.json({ error: 'REVISION_CONFLICT' }, { status: 409 });
+  });
+  const response = await fetch(base + '/api/actions', { method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json', 'x-life-os-actor': 'owner@example.com', cookie: 'must-not-forward=1', 'x-arbitrary': 'ignored' }, body });
+  assert.equal(response.status, 409); assert.deepEqual(await response.json(), { error: 'REVISION_CONFLICT' });
+});
+
+test('rejects unsafe action headers, body and path without upstream access', async t => {
+  const base = await fixture(t, () => { throw new Error('Must not call upstream'); });
+  const headers = { authorization: 'Bearer ' + token, 'content-type': 'application/json', 'x-life-os-actor': 'owner@example.com' };
+  for (const actor of ['', 'not-email', 'owner@example.com,other@example.com', 'a'.repeat(255)]) {
+    assert.equal((await fetch(base + '/api/actions', { method: 'POST', headers: { ...headers, 'x-life-os-actor': actor }, body: '{}' })).status, 400);
+  }
+  for (const [body, extra, status] of [['{', {}, 400], ['"' + 'x'.repeat(65_536) + '"', {}, 413], ['{}', { 'content-type': 'text/plain' }, 415], ['{}', { 'content-encoding': 'gzip' }, 415]]) {
+    assert.equal((await fetch(base + '/api/actions', { method: 'POST', headers: { ...headers, ...extra }, body })).status, status);
+  }
+  assert.equal((await fetch(base + '/api/actions?x=1', { method: 'POST', headers, body: '{}' })).status, 404);
+  assert.equal((await fetch(base + '/api/actions', { headers })).status, 404);
+});
+
+test('enforces the body limit on chunked actions without trusting content-length', async t => {
+  const base = await fixture(t, () => { throw new Error('Must not call upstream'); });
+  const body = new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode('x'.repeat(65_537))); controller.close(); } });
+  const response = await fetch(base + '/api/actions', { method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json', 'x-life-os-actor': 'owner@example.com' }, body, duplex: 'half' });
+  assert.equal(response.status, 413);
+});
+
+for (const status of [200, 202, 400, 401, 503]) test('preserves safe upstream JSON status ' + status, async t => {
+  const base = await fixture(t, async () => Response.json({ status }, { status }));
+  const response = await fetch(base + '/api/automation', { headers: { authorization: 'Bearer ' + token } });
+  assert.equal(response.status, status); assert.deepEqual(await response.json(), { status });
 });

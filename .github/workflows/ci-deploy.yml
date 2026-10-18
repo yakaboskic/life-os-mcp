@@ -26,19 +26,25 @@ jobs:
       - run: npm run build
       - name: Validate operational scripts
         run: |
-          bash -n scripts/release-build.sh scripts/deploy-github.sh scripts/gcp-provision.sh scripts/gcp-web-gateway.sh scripts/mcp-remote.sh deploy/bootstrap-vm.sh deploy/lifeos-deploy deploy/backup-upload.sh
-          python3 -m py_compile scripts/gcp-iap-policy.py scripts/gcp-monitoring.py scripts/release-upload.py deploy/monitor.py deploy/upload-backup.py
-          python3 -m unittest scripts/test_release_upload.py deploy/test_monitor.py deploy/test_upload_backup.py
+          bash -n scripts/release-build.sh scripts/deploy-github.sh scripts/deploy-gateway.sh scripts/gateway-image-build.sh scripts/gcp-provision.sh scripts/gcp-web-gateway.sh scripts/gcp-gateway-ci.sh scripts/mcp-remote.sh deploy/bootstrap-vm.sh deploy/install-claude-runner.sh deploy/lifeos-deploy deploy/backup-upload.sh
+          python3 -m py_compile scripts/gcp-iap-policy.py scripts/gcp-monitoring.py scripts/release-upload.py deploy/monitor.py deploy/upload-backup.py deploy/web-smoke.py
+          python3 -m unittest scripts/test_release_upload.py scripts/test_deploy_gateway.py deploy/test_monitor.py deploy/test_upload_backup.py deploy/test_web_smoke.py
           scripts/release-check-units.sh
       - name: Package and smoke-test production release
         env:
           LIFE_OS_RELEASE_SHA: ${{ github.sha }}
         run: scripts/release-build.sh release
+      - name: Package the exact gateway image
+        env:
+          LIFE_OS_RELEASE_SHA: ${{ github.sha }}
+        run: scripts/gateway-image-build.sh release
       - id: release
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: life-os-${{ github.sha }}
-          path: release/life-os.tar.gz*
+          path: |
+            release/life-os.tar.gz*
+            release/gateway-image.tar.gz*
           if-no-files-found: error
           retention-days: 14
   deploy:
@@ -70,9 +76,20 @@ jobs:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
       - name: Upload exact verified artifact and supervise VM rollout
+        id: vm
         env:
           GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
           GCP_ZONE: ${{ secrets.GCP_ZONE }}
           GCP_INSTANCE: ${{ secrets.GCP_INSTANCE }}
           GCP_RELEASE_BUCKET: ${{ secrets.GCP_RELEASE_BUCKET }}
         run: scripts/deploy-github.sh
+      - name: Deploy and verify the immutable gateway image
+        if: steps.vm.outputs.deployed == 'true' && vars.LIFE_OS_GATEWAY_DEPLOY_ENABLED == 'true'
+        env:
+          GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
+          GCP_ZONE: ${{ secrets.GCP_ZONE }}
+          GCP_INSTANCE: ${{ secrets.GCP_INSTANCE }}
+          GCP_GATEWAY_REGION: ${{ secrets.GCP_GATEWAY_REGION }}
+          GCP_GATEWAY_SERVICE: ${{ secrets.GCP_GATEWAY_SERVICE }}
+          GCP_GATEWAY_REPOSITORY: ${{ secrets.GCP_GATEWAY_REPOSITORY }}
+        run: scripts/deploy-gateway.sh

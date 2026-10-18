@@ -5,7 +5,10 @@ import { PUBLIC_PAGES, PUBLIC_PAGE_LINKS } from "./public-pages.js";
 import { FLOW_COOKIE, SESSION_COOKIE, clearFlowCookie, clearSessionCookie, cookies, flowCookie, loginUrl, newLoginFlow, readLoginFlow, readSession, readWebConfig, sessionCookie, validateIdentity, verifyGoogleIdToken, type Identity, type WebConfig } from "./auth.js";
 
 export interface WebDependencies { env?: NodeJS.ProcessEnv; fetch?: typeof fetch; now?: () => number; verifyIdToken?: (token: string, audience: string) => Promise<Identity> }
-const API_PATHS = new Set(["/api/data", "/api/triage", "/api/jobs"]);
+const READ_PATHS = new Set(["/api/data", "/api/triage", "/api/jobs", "/api/automation"]);
+const API_PATHS = new Set([...READ_PATHS, "/api/actions"]);
+const RELAY_STATUSES = new Set([200, 201, 202, 400, 401, 403, 404, 409, 413, 415, 429, 503]);
+const MAX_ACTION_BYTES = 64 * 1024;
 const PRIVATE_HTML = PORTAL_HTML.replace("</body>", '<form method="post" action="/auth/logout" style="position:fixed;right:20px;bottom:10px;z-index:100"><a href="/privacy" style="color:#8da9b5;background:#101c25;padding:6px 12px;font-size:12px">Privacy</a><button type="submit" style="color:#8da9b5;background:#101c25;border:1px solid #3b6474;padding:6px 12px;cursor:pointer">Sign out</button></form></body>');
 const SCRIPT_HASHES = [...PRIVATE_HTML.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((match) => `'sha256-${createHash("sha256").update(match[1]!).digest("base64")}'`).join(" ");
 const CSP = `default-src 'none'; script-src ${SCRIPT_HASHES || "'none'"}; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`;
@@ -37,6 +40,26 @@ async function limitedJson(upstream: Response): Promise<unknown> {
   try { for (;;) { const { done, value } = await reader.read(); if (done) break; size += value.length; if (size > 5_000_000) throw new Error("GATEWAY_RESPONSE_TOO_LARGE"); chunks.push(value); } }
   finally { await reader.cancel(); }
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+}
+
+async function actionBody(request: Request): Promise<string> {
+  if (!/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(request.headers.get("content-type") ?? "") || request.headers.has("content-encoding")) throw Object.assign(new Error("Expected application/json"), { status: 415 });
+  const declared = request.headers.get("content-length");
+  if (declared !== null && (!/^\d+$/.test(declared) || Number(declared) > MAX_ACTION_BYTES)) throw Object.assign(new Error("Action exceeds 64 KiB"), { status: 413 });
+  const reader = request.body?.getReader();
+  if (!reader) throw Object.assign(new Error("Invalid JSON"), { status: 400 });
+  const chunks: Uint8Array[] = []; let bytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read(); if (done) break;
+      bytes += value.length;
+      if (bytes > MAX_ACTION_BYTES) throw Object.assign(new Error("Action exceeds 64 KiB"), { status: 413 });
+      chunks.push(value);
+    }
+    const body = Buffer.concat(chunks).toString("utf8");
+    try { JSON.parse(body); } catch { throw Object.assign(new Error("Invalid JSON"), { status: 400 }); }
+    return body;
+  } finally { await reader.cancel(); }
 }
 
 export function createWebHandler(dependencies: WebDependencies = {}): (request: Request) => Promise<Response> {
@@ -89,14 +112,24 @@ export function createWebHandler(dependencies: WebDependencies = {}): (request: 
       const result = redirect("/"); result.headers.append("set-cookie", clearSessionCookie()); result.headers.append("set-cookie", clearFlowCookie()); result.headers.set("clear-site-data", '"cache", "storage"'); return result;
     }
     if (!session) return API_PATHS.has(url.pathname) ? json({ error: "Sign in required", loginUrl: "/auth/login" }, 401) : response(loginPage(), 200);
-    if (request.method !== "GET") return json({ error: "Method not allowed" }, 405);
+    const isAction = url.pathname === "/api/actions";
+    if ((isAction && request.method !== "POST") || (!isAction && request.method !== "GET")) return json({ error: "Method not allowed" }, 405);
     if (url.pathname === "/" && !url.search) return response(PRIVATE_HTML);
     if (API_PATHS.has(url.pathname) && !url.search) {
-      if (request.headers.get("sec-fetch-site") === "cross-site" || (request.headers.has("origin") && request.headers.get("origin") !== config.publicUrl)) return json({ error: "Invalid request origin" }, 403);
+      const site = request.headers.get("sec-fetch-site"), origin = request.headers.get("origin");
+      if (isAction ? origin !== config.publicUrl || site !== "same-origin" : site === "cross-site" || (origin !== null && origin !== config.publicUrl)) return json({ error: "Invalid request origin" }, 403);
+      let body: string | undefined;
+      if (isAction) {
+        try { body = await actionBody(request); }
+        catch (error) { const status = (error as { status?: number }).status; return json({ error: status === 413 ? "Action exceeds 64 KiB" : status === 415 ? "Expected application/json" : "Invalid JSON" }, status === 413 || status === 415 ? status : 400); }
+      }
       try {
-        const upstream = await requestUpstream(`${config.gatewayUrl}${url.pathname}`, { method: "GET", headers: { authorization: `Bearer ${config.gatewayToken}`, accept: "application/json" }, cache: "no-store", redirect: "error", signal: AbortSignal.timeout(20_000) });
-        if (!upstream.ok) return json({ error: "LifeOS is temporarily unavailable" }, 502);
-        return json(await limitedJson(upstream), 200);
+        // Construct every upstream header; browser-supplied actors and credentials never cross this boundary.
+        const headers: Record<string, string> = { authorization: `Bearer ${config.gatewayToken}`, accept: "application/json" };
+        if (isAction) { headers["content-type"] = "application/json"; headers["x-life-os-actor"] = session.email; }
+        const upstream = await requestUpstream(`${config.gatewayUrl}${url.pathname}`, { method: isAction ? "POST" : "GET", headers, body, cache: "no-store", redirect: "error", signal: AbortSignal.timeout(20_000) });
+        if (!RELAY_STATUSES.has(upstream.status)) { await upstream.body?.cancel(); return json({ error: "LifeOS is temporarily unavailable" }, 502); }
+        return json(await limitedJson(upstream), upstream.status);
       } catch { return json({ error: "LifeOS is temporarily unavailable" }, 502); }
     }
     return json({ error: "Not found" }, 404);

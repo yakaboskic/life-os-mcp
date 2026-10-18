@@ -27,6 +27,10 @@ os.chmod(tmp,0o644);os.replace(tmp,path)
 PY
 }
 case "$mode" in
+  web-smoke)
+    [[ $checksum == candidate || $checksum == production ]] || exit 2
+    /usr/local/lib/life-os/web-smoke.py "$sha" "$run" "$checksum"
+    exit 0;;
   status)
     [[ -f $status_file ]] || { echo '{"status":"unknown"}'; exit 1; }
     cat "$status_file"
@@ -55,7 +59,7 @@ case "$mode" in
   activate)
     [[ $PPID == 1 ]] || { echo "Activation must be supervised by systemd" >&2; exit 2; }
     [[ $checksum =~ ^[0-9a-f]{64}$ ]] || exit 2;;
-  *) echo 'Allowed commands: submit/status (activation is supervised)' >&2; exit 2;;
+  *) echo 'Allowed commands: submit/status/web-smoke (activation is supervised)' >&2; exit 2;;
 esac
 exec 9>/run/lock/life-os-deploy.lock
 flock -w 3300 9 || { write_status failed_lock; exit 1; }

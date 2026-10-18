@@ -52,6 +52,8 @@ export interface TimeEntry {
 }
 
 export interface TimerState {
+  /** Unique identity even if a timer is replaced within the same millisecond. */
+  id?: string;
   taskId: string;
   start: string; // ISO UTC instant
   note?: string;

@@ -14,7 +14,7 @@ LifeOS production state lives on the persistent disk mounted at `/var/lib/life-o
 | Release artifacts | Private GCS release bucket | GitHub upload only; VM read only |
 | Backups | Private GCS backup bucket | VM create only; hourly retained 2 days, daily 30 days |
 | Operational alerts | Cloud Monitoring `global` metrics | Independent of Gmail authentication and VM lifecycle |
-| Optional private web bridge | Cloud Run, Direct VPC | HTTPS bearer gateway, three read-only routes to VM private port 4749 |
+| Optional private web bridge | Cloud Run, Direct VPC | HTTPS bearer gateway, four read routes and bounded action endpoint to VM private port 4749 |
 | Private PWA | Vercel | Google sign-in; exact allowlist the single `LIFE_OS_ALLOWED_EMAIL` address; gateway secret stays server-side |
 
 The VM has an external IPv4 address for outbound Gmail/Jev traffic. It has no public application listener. Its dedicated VPC accepts SSH only from IAP's `35.235.240.0/20` range. The optional web bridge adds port 4749 only from the dedicated `10.53.0.0/24` subnet, never the internet. IAP and OS Login protect SSH.
@@ -116,17 +116,44 @@ Open `http://localhost:4747`. For MCP, run the thin `life-os serve --connect htt
 
 ## Private web bridge and iPhone PWA
 
-After the VM private read-only listener is implemented and configured:
+After the VM private listener is implemented and configured:
 
 ```sh
 scripts/gcp-web-gateway.sh
 ```
 
-This creates a dedicated Cloud Run runtime identity, separate build identity, and `life-os-web-gateway-token` secret, then deploys the dependency-free gateway with a pinned official Node image. The runtime identity can read that single secret. The gateway validates the secret, rejects browser origins/writes/unrecognized paths, limits response size/time, follows no redirects and forwards only `GET /api/data`, `/api/triage`, `/api/jobs` to the VM private IP on 4749. It scales to zero, with a maximum of one instance.
+This creates a dedicated Cloud Run runtime identity, separate build identity, and `life-os-web-gateway-token` secret, then deploys the dependency-free gateway with a pinned official Node image. The runtime identity can read that single secret. The gateway validates the secret, rejects browser origins and unrecognized routes, limits request/response size and time, follows no redirects, and forwards only `GET /api/data`, `/api/triage`, `/api/jobs`, `/api/automation` plus `POST /api/actions` to the VM private IP on 4749. Actions are bounded to 64 KiB of JSON; Vercel requires the authenticated session, exact Origin and same-origin Fetch Metadata and derives the actor itself. The VM invokes the authoritative daemon callback, never an unauthenticated local write route. It scales to zero, with a maximum of one instance.
 
 Install the same gateway secret into the VM private listener and the **server-side** Vercel environment. Set the Vercel backend URL to the script's HTTPS service URL. Never expose this secret in public environment variables or browser JavaScript. The Vercel app must authenticate Google sign-in and enforce the exact allowlisted account before making any gateway request. Its responses must be `no-store`; the PWA service worker must never cache private API data or login responses. Home-screen installation does not replace authentication.
 
-A Cloud Run URL without the bearer secret must return an authorization error. A bearer-authenticated request to `/mcp`, `/v1/jobs`, any write method or any nonallowlisted route must fail. Test Google sign-in as the allowlisted account and rejection of another account before considering web rollout complete.
+A Cloud Run URL without the bearer secret must return an authorization error. A bearer-authenticated request to `/mcp`, `/v1/jobs`, any nonallowlisted write route, or an action without a valid actor/JSON body must fail. Test Google sign-in as the allowlisted account and rejection of another account before considering web rollout complete.
+
+## Gateway deployment from GitHub
+
+Run `scripts/gcp-gateway-ci.sh` once as an infrastructure administrator with `LIFE_OS_PROJECT` and `LIFE_OS_GITHUB_REPO`. It creates a dedicated immutable-tag Artifact Registry repository. The existing OIDC deployer receives Writer on that repository, Run Developer on the existing gateway service, and Service Account User on its runtime identity. It gains no secret-read permission or project-wide build/admin role. Deployment identifiers are saved only in GitHub's production environment secrets.
+
+Install the reviewed `deploy/lifeos-deploy` and `deploy/web-smoke.py` as root-owned `/usr/local/sbin/lifeos-deploy` and `/usr/local/lib/life-os/web-smoke.py`. Add the gateway's exact legacy `https://SERVICE-HASH-REGION.a.run.app` origin as `LIFE_OS_GATEWAY_ORIGIN` in root-only `/etc/life-os/deploy.env`; use the service URL returned by Cloud Run, not an arbitrary caller-provided URL. Then set the repository variable `LIFE_OS_GATEWAY_DEPLOY_ENABLED=true`.
+
+CI builds the gateway image in the verified job, stores its checksum and exact image alongside the application artifact, and deploys the VM first. A superseded VM run cannot deploy an older gateway. The gateway stage loads that exact Linux image, pushes it under an immutable run-specific tag, deploys its digest with zero production traffic, and checks a temporary tagged revision through the VM's root-owned GET-only smoke helper. The helper verifies exact VM/gateway release identities and all four authenticated read routes without printing personal responses or credentials. Production traffic changes only after these checks. A failed post-switch check restores the previous revision; it never rolls back live VM data. Existing secrets, identity, VPC and scaling configuration are preserved.
+
+Vercel's Git deployment remains independent. Dashboard controls must use server-reported capabilities and display temporary unavailable/conflict responses safely during mixed-version rollout. The VM remains compatible with the prior read-only bridge; gateway failure leaves the new VM running and restores the prior gateway. The manual VM rollback workflow changes VM binaries only; use an attended Cloud Run traffic rollback if the bridge also needs reverting.
+
+## Isolated Claude Code subscription runner
+
+The optional runner uses the owner's native Claude Code login, separate from Gmail OAuth and Jev. It is installed explicitly by `sudo bash deploy/install-claude-runner.sh`. The script downloads the pinned official Linux binary, verifies the repository-pinned SHA-256, checks required flags as an unprivileged user, and creates `lifeos-agent` with private home `/var/lib/life-os-agent`. It does not start a login or restart LifeOS. Binary versions/checksums are maintained in `deploy/claude-version` and `deploy/claude-linux-x64.sha256`; upgrades are reviewed infrastructure changes, not runtime self-updates.
+
+The owner signs in directly over their own SSH terminal:
+
+```sh
+sudo -u lifeos-agent -H env CLAUDE_CONFIG_DIR=/var/lib/life-os-agent/.claude \
+  DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1 /opt/claude-code/current/claude auth login
+```
+
+Do not copy a laptop credential file, place tokens in chat, or set an API key to substitute for this login. The runner service intentionally does not load `/etc/life-os/runtime.env`. Only the Unix socket group `lifeos-agent-client` is shared with the daemon. The runner cannot access `/var/lib/life-os` or `/etc/life-os`, and its service blocks the GCP metadata addresses and LifeOS TCP listeners. The root-owned binary runs with customizations/tools/MCP disabled by the application. It returns validated proposals; the authoritative daemon controls state changes.
+
+On the existing 2 GB VM, the service uses one execution at a time with `MemoryHigh=750M`, `MemoryMax=900M`, no swap, and a CPU quota. This is an explicitly constrained deployment below Claude Code's documented 4 GB requirement: representative authenticated runs and memory monitoring are required before relying on unattended execution. Memory exhaustion must fail the agent job without killing the LifeOS daemon. Subscription availability/rate limits remain external dependencies; they must appear as explicit job errors and must not silently switch to paid API billing.
+
+`life-os-agent.service` follows backend stop/restart through `PartOf` and is started through the backend's weak `Wants` dependency. A failed or unauthenticated runner does not prevent the dashboard or Gmail worker from starting. The daemon's deployment drain must include active agent jobs before its service stops. Runner login material is separate from the current LifeOS backup scope; recovery requires another native sign-in.
 
 ## Backups, restoration and alerts
 

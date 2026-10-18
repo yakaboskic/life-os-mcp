@@ -1,0 +1,62 @@
+[Unit]
+Description=LifeOS isolated Claude Code subscription runner
+After=network-online.target
+Wants=network-online.target
+Before=life-os.service
+PartOf=life-os.service
+ConditionPathExists=/opt/claude-code/current/claude
+ConditionPathExists=/opt/life-os/current/dist/index.js
+
+[Service]
+Type=simple
+User=lifeos-agent
+Group=lifeos-agent-client
+WorkingDirectory=/var/lib/life-os-agent/work
+Environment=HOME=/var/lib/life-os-agent
+Environment=CLAUDE_CONFIG_DIR=/var/lib/life-os-agent/.claude
+Environment=LIFE_OS_CLAUDE_BIN=/opt/claude-code/current/claude
+Environment=LIFE_OS_AGENT_SOCKET=/run/life-os-agent/runner.sock
+Environment=DISABLE_AUTOUPDATER=1
+Environment=DISABLE_UPDATES=1
+Environment=NODE_ENV=production
+Environment=PATH=/opt/node/bin:/usr/local/bin:/usr/bin:/bin
+# Never load the daemon runtime.env: it contains Gmail/interactive secret paths.
+UnsetEnvironment=ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_BASE_URL
+ExecStart=/opt/life-os/current/bin/life-os agent-runner
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+KillMode=control-group
+UMask=0077
+RuntimeDirectory=life-os-agent
+RuntimeDirectoryMode=0750
+ReadWritePaths=/var/lib/life-os-agent /run/life-os-agent
+InaccessiblePaths=/var/lib/life-os /etc/life-os
+ProtectSystem=strict
+ProtectHome=true
+ProtectProc=invisible
+PrivateTmp=true
+PrivateDevices=true
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+IPAddressDeny=169.254.169.254
+IPAddressDeny=fd20:ce::254
+# The Unix socket is the only LifeOS connection; leave the local DNS stub usable.
+IPAddressDeny=127.0.0.1
+IPAddressDeny=::1
+IPAddressDeny=10.53.0.0/24
+MemoryHigh=750M
+MemoryMax=900M
+MemorySwapMax=0
+TasksMax=96
+CPUQuota=75%
+LimitNOFILE=1024
+
+[Install]
+WantedBy=multi-user.target

@@ -1,7 +1,7 @@
 [Unit]
 Description=LifeOS authoritative backend and dashboard
 After=network-online.target
-Wants=network-online.target
+Wants=network-online.target life-os-agent.service
 RequiresMountsFor=/var/lib/life-os
 ConditionPathExists=/opt/life-os/current/dist/index.js
 
@@ -9,6 +9,7 @@ ConditionPathExists=/opt/life-os/current/dist/index.js
 Type=simple
 User=lifeos
 Group=lifeos
+SupplementaryGroups=lifeos-agent-client
 WorkingDirectory=/opt/life-os/current
 EnvironmentFile=/etc/life-os/runtime.env
 EnvironmentFile=-/etc/life-os/release.env

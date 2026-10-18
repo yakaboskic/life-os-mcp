@@ -146,3 +146,51 @@ describe("read-only backend proxy and logout", () => {
     expect(result.headers.get("clear-site-data")).toContain('"storage"');
   });
 });
+
+describe("authenticated browser actions", () => {
+  const body = JSON.stringify({ requestId: "request-1", action: "task.update", input: { id: "t1", status: "done" } });
+  const headers = () => ({ cookie: signedSession(), origin: config.publicUrl, "sec-fetch-site": "same-origin", "content-type": "application/json" });
+  it("overwrites spoofed actor and credentials and preserves a conflict response", async () => {
+    let calls = 0;
+    const handler = createWebHandler({ env, now: () => NOW, fetch: (async (url, options) => {
+      calls++; expect(String(url)).toBe(`${config.gatewayUrl}/api/actions`); expect(options?.method).toBe("POST"); expect(options?.body).toBe(body);
+      expect(options?.headers).toEqual({ authorization: `Bearer ${config.gatewayToken}`, accept: "application/json", "content-type": "application/json", "x-life-os-actor": OWNER_EMAIL });
+      return Response.json({ error: "REVISION_CONFLICT" }, { status: 409, headers: { "set-cookie": "not-forwarded=1" } });
+    }) as typeof fetch });
+    const result = await handler(request("/api/actions", { method: "POST", headers: { ...headers(), "x-life-os-actor": "attacker@example.com", authorization: "Bearer browser" }, body }));
+    expect(result.status).toBe(409); expect(await result.json()).toEqual({ error: "REVISION_CONFLICT" }); expect(result.headers.get("set-cookie")).toBeNull(); expect(result.headers.get("cache-control")).toContain("no-store"); expect(calls).toBe(1);
+  });
+  it.each([{}, { origin: config.publicUrl }, { origin: "https://attacker.example", "sec-fetch-site": "same-origin" }, { origin: config.publicUrl, "sec-fetch-site": "same-site" }, { origin: config.publicUrl, "sec-fetch-site": "cross-site" }, { origin: config.publicUrl, "sec-fetch-site": "none" }])("rejects incomplete or cross-origin write context %o", async (context) => {
+    let calls = 0; const handler = createWebHandler({ env, now: () => NOW, fetch: (async () => { calls++; return Response.json({}); }) as typeof fetch });
+    const result = await handler(request("/api/actions", { method: "POST", headers: { cookie: signedSession(), "content-type": "application/json", ...context }, body }));
+    expect(result.status).toBe(403); expect(calls).toBe(0);
+  });
+  it("requires a valid session before accepting an action or exposing automation", async () => {
+    const handler = createWebHandler({ env, now: () => NOW });
+    expect((await handler(request("/api/actions", { method: "POST", headers: { ...headers(), cookie: "" }, body }))).status).toBe(401);
+    expect((await handler(request("/api/automation"))).status).toBe(401);
+  });
+  it.each([
+    { body: "{", status: 400 },
+    { body: '"' + "a".repeat(65_536) + '"', status: 413 },
+    { body: "{}", type: "text/plain", status: 415 },
+    { body: "{}", type: "application/json-patch+json", status: 415 },
+    { body: "{}", encoding: "gzip", status: 415 },
+  ])("rejects malformed, oversized and incorrectly typed actions: $status", async (input) => {
+    let calls = 0; const handler = createWebHandler({ env, now: () => NOW, fetch: (async () => { calls++; return Response.json({}); }) as typeof fetch });
+    const extra = { ...headers(), "content-type": input.type ?? "application/json", ...(input.encoding ? { "content-encoding": input.encoding } : {}) };
+    expect((await handler(request("/api/actions", { method: "POST", headers: extra, body: input.body }))).status).toBe(input.status); expect(calls).toBe(0);
+  });
+  it.each([200, 202, 400, 401, 409, 503])("preserves bounded JSON response status %i", async (status) => {
+    const handler = createWebHandler({ env, now: () => NOW, fetch: (async () => Response.json({ status }, { status })) as typeof fetch });
+    const result = await handler(request("/api/actions", { method: "POST", headers: headers(), body }));
+    expect(result.status).toBe(status); expect(await result.json()).toEqual({ status });
+  });
+  it("reads automation but never turns GET actions or query aliases into writes", async () => {
+    let calls = 0; const handler = createWebHandler({ env, now: () => NOW, fetch: (async (url, options) => { calls++; expect(String(url)).toBe(`${config.gatewayUrl}/api/automation`); expect(options?.method).toBe("GET"); return Response.json({ runs: [] }); }) as typeof fetch });
+    expect((await handler(request("/api/automation", { headers: headers() }))).status).toBe(200);
+    expect((await handler(request("/api/actions", { headers: headers() }))).status).toBe(405);
+    expect((await handler(request("/api/actions?x=1", { method: "POST", headers: headers(), body }))).status).toBe(404);
+    expect(calls).toBe(1);
+  });
+});

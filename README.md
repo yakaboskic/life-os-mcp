@@ -6,6 +6,19 @@ Production runtime uses Node 24, SQLite, systemd, and a private GCP VM. Pushes t
 
 The Starfleet dashboard is an installable PWA. Its [Vercel web gateway](web-app/README.md) supports Google sign-in restricted to the configured owner; the VM retains all live data. SSH access and browser access use separate credentials.
 
+The authenticated dashboard can start, switch and stop focus sessions; create, edit and complete tasks; and log or correct time. Browser and MCP actions share the same transactional tracker. Version checks prevent stale edits, and durable request receipts make retries safe. The standalone `life-os web` command remains read-only.
+
+Optional VM automations review held Gmail classifications and produce a daily brief in the dashboard and the operator's configured inbox. Initial classification stays with Jev; Claude reviews only eligible uncertain classifications. Configure a native Claude Code login in the dedicated runner account, or choose the separately billed Claude API provider. Named jobs have durable state, bounded usage, recovery and delivery reconciliation; the agent never receives Gmail credentials or arbitrary send authority.
+
+```sh
+life-os automation status
+life-os automation run review
+life-os automation run brief
+life-os automation schedule --time 07:00 --enable
+```
+
+These commands connect to the authoritative daemon using its interactive credential. Agents can use `lifeos_snapshot`, `lifeos_action` and `lifeos_automations` through MCP. The daily workflow follows scheduled Gmail triage; the configured Eastern time is a fallback trigger if triage did not enqueue it. Pause with `life-os automation schedule --disable`. A brief already saved for the day is reused and is not emailed a second time on rerun. See [operations](docs/gcp-operations.md) for deployment and native Claude sign-in.
+
 ## Deploy your own instance
 
 The repository contains reusable application code and deployment templates. Each installation supplies its own Google OAuth clients, Jev key, GCP project, Vercel project, and exact sign-in address. Copy [.env.example](.env.example) to a private `.env` with mode `0600`; never commit credentials, tokens, or live data.

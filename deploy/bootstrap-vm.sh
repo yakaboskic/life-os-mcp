@@ -57,6 +57,7 @@ if ! findmnt /var/lib/life-os >/dev/null; then
 fi
 [[ $(findmnt -n -o UUID /var/lib/life-os) == "$uuid" ]] || { echo 'Unexpected mounted state disk' >&2; exit 1; }
 id lifeos >/dev/null 2>&1 || useradd --system --home-dir /var/lib/life-os --shell /usr/sbin/nologin lifeos
+getent group lifeos-agent-client >/dev/null || groupadd --system lifeos-agent-client
 chown lifeos:lifeos /var/lib/life-os
 chmod 700 /var/lib/life-os
 install -o lifeos -g lifeos -m 600 /dev/null /var/lib/life-os/.vm-authoritative
@@ -98,14 +99,21 @@ LIFE_OS_PROJECT=$LIFE_OS_PROJECT
 LIFE_OS_BACKUP_BUCKET=$LIFE_OS_BACKUP_BUCKET
 ENV
 fi
+gateway_origin=${LIFE_OS_GATEWAY_ORIGIN:-}
+if [[ -z $gateway_origin && -f /etc/life-os/deploy.env ]]; then
+  gateway_origin=$(sed -n 's/^LIFE_OS_GATEWAY_ORIGIN=//p' /etc/life-os/deploy.env)
+fi
+[[ -z $gateway_origin || $gateway_origin =~ ^https://[a-z0-9-]+\.a\.run\.app$ ]] || { echo 'Invalid pinned Cloud Run gateway origin' >&2; exit 2; }
 cat >/etc/life-os/deploy.env <<ENV
 LIFE_OS_RELEASE_BUCKET=$LIFE_OS_RELEASE_BUCKET
 LIFE_OS_NODE_VERSION=$node_version
+LIFE_OS_GATEWAY_ORIGIN=$gateway_origin
 ENV
 chmod 640 /etc/life-os/runtime.env
 chown root:lifeos /etc/life-os/runtime.env
 chmod 600 /etc/life-os/deploy.env
 install -o root -g root -m 755 "$base/lifeos-deploy" /usr/local/sbin/lifeos-deploy
+install -o root -g root -m 755 "$base/web-smoke.py" /usr/local/lib/life-os/web-smoke.py
 install -o root -g root -m 755 "$base/backup-upload.sh" /usr/local/lib/life-os/backup-upload.sh
 install -o root -g root -m 755 "$base/upload-backup.py" /usr/local/lib/life-os/upload-backup.py
 install -o root -g root -m 755 "$base/monitor.py" /usr/local/lib/life-os/monitor.py
@@ -114,6 +122,8 @@ printf '%s ALL=(root) NOPASSWD: /usr/local/sbin/lifeos-deploy *\n' "$LIFE_OS_DEP
 chmod 440 /etc/sudoers.d/life-os-deploy
 visudo -cf /etc/sudoers.d/life-os-deploy
 systemctl daemon-reload
+# The optional isolated subscription runner is installed explicitly with
+# deploy/install-claude-runner.sh; bootstrap does not initiate Claude login.
 systemctl enable life-os.service life-os-backup.timer life-os-monitor.timer
 systemctl start life-os-backup.timer life-os-monitor.timer
 # The Gmail timer is deliberately NOT enabled before account migration and shadow review.

@@ -2,31 +2,69 @@ import { createServer } from 'node:http';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
-const allowed = new Set(['/api/data', '/api/triage', '/api/jobs']);
+const allowed = new Set(['/api/data', '/api/triage', '/api/jobs', '/api/automation']);
+const relayStatuses = new Set([200, 201, 202, 400, 401, 403, 404, 409, 413, 415, 429, 503]);
 const digest = value => createHash('sha256').update(value).digest();
 const maximumResponseBytes = 5 * 1024 * 1024;
+const maximumActionBytes = 64 * 1024;
+const validActor = value => typeof value === 'string' && value.length <= 254 && /^[a-z0-9][a-z0-9._+-]*@[a-z0-9.-]+\.[a-z0-9-]+$/.test(value);
 
-export function createGateway({ token, upstream, fetchImpl = fetch }) {
+function actionBody(req) {
+  if (!/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(req.headers['content-type'] ?? '') || req.headers['content-encoding']) return Promise.reject(Object.assign(new Error('Expected application/json'), { status: 415 }));
+  const declared = req.headers['content-length'];
+  if (declared !== undefined && (!/^\d+$/.test(declared) || Number(declared) > maximumActionBytes)) return Promise.reject(Object.assign(new Error('Action exceeds 64 KiB'), { status: 413 }));
+  return new Promise((resolve, reject) => {
+    const chunks = []; let bytes = 0, finished = false;
+    const finish = (error, value) => { if (finished) return; finished = true; clearTimeout(timer); if (error) reject(error); else resolve(value); };
+    const timer = setTimeout(() => finish(Object.assign(new Error('Request timed out'), { status: 400 })), 10_000);
+    req.on('data', chunk => {
+      if (finished) return;
+      bytes += chunk.length;
+      if (bytes > maximumActionBytes) { finish(Object.assign(new Error('Action exceeds 64 KiB'), { status: 413 })); return; }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      if (finished) return;
+      const body = Buffer.concat(chunks).toString('utf8');
+      try { JSON.parse(body); finish(undefined, body); } catch { finish(Object.assign(new Error('Invalid JSON'), { status: 400 })); }
+    });
+    req.on('error', () => finish(Object.assign(new Error('Invalid request'), { status: 400 })));
+    req.on('aborted', () => finish(Object.assign(new Error('Invalid request'), { status: 400 })));
+  });
+}
+
+export function createGateway({ token, upstream, release = 'development', fetchImpl = fetch }) {
   token = typeof token === 'string' ? token.trim() : token;
   if (typeof token !== 'string' || token.length < 32) throw new Error('A gateway credential of at least 32 characters is required');
+  if (release !== 'development' && !/^[a-f0-9]{40}$/.test(release)) throw new Error('Invalid release identity');
   const origin = new URL(upstream);
   const octets = origin.hostname.split('.').map(Number);
   if (origin.protocol !== 'http:' || origin.port !== '4749' || octets.length !== 4 || !octets.every(Number.isInteger) || octets[0] !== 10 || octets[1] !== 53 || octets[2] !== 0 || octets[3] < 1 || octets[3] > 254 || origin.username || origin.password || origin.pathname !== '/' || origin.search || origin.hash) throw new Error('Upstream must be the LifeOS VM private address on port 4749');
   const expected = digest(token);
   const server = createServer(async (req, res) => {
     const respond = (status, value) => {
-      res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'; frame-ancestors 'none'" });
+      res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'private, no-store', 'x-life-os-release': release, 'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'; frame-ancestors 'none'" });
       res.end(typeof value === 'string' ? value : JSON.stringify(value));
     };
     const authorization = req.headers.authorization ?? '';
     if (req.headers.origin || !authorization.startsWith('Bearer ') || !timingSafeEqual(expected, digest(authorization.slice(7)))) { respond(401, { error: 'Unauthorized' }); return; }
-    if (req.method !== 'GET' || !allowed.has(req.url ?? '') || req.headers['transfer-encoding'] || Number(req.headers['content-length'] ?? 0) !== 0) { respond(404, { error: 'Not found' }); return; }
+    const isAction = req.method === 'POST' && req.url === '/api/actions';
+    if (!isAction && (req.method !== 'GET' || !allowed.has(req.url ?? '') || req.headers['transfer-encoding'] || Number(req.headers['content-length'] ?? 0) !== 0)) { respond(404, { error: 'Not found' }); return; }
+    const actor = req.headers['x-life-os-actor'];
+    if (isAction && !validActor(actor)) { respond(400, { error: 'Invalid action actor' }); return; }
+    let action;
+    if (isAction) {
+      try { action = await actionBody(req); }
+      catch (error) { req.resume(); respond(error.status ?? 400, { error: error.message }); return; }
+    }
     try {
+      const headers = { authorization: 'Bearer ' + token, accept: 'application/json' };
+      if (isAction) { headers['content-type'] = 'application/json'; headers['x-life-os-actor'] = actor; }
       const response = await fetchImpl(new URL(req.url, origin), {
-        method: 'GET', headers: { authorization: 'Bearer ' + token, accept: 'application/json' },
+        method: isAction ? 'POST' : 'GET', headers, body: action,
         redirect: 'error', signal: AbortSignal.timeout(10_000),
       });
-      if (response.status !== 200 || !response.headers.get('content-type')?.startsWith('application/json')) { await response.body?.cancel(); respond(502, { error: 'LifeOS is unavailable' }); return; }
+      if (!relayStatuses.has(response.status) || !response.headers.get('content-type')?.startsWith('application/json')) { await response.body?.cancel(); respond(502, { error: 'LifeOS is unavailable' }); return; }
       const reader = response.body?.getReader();
       if (!reader) throw new Error('Missing upstream response');
       const chunks = []; let size = 0;
@@ -39,7 +77,7 @@ export function createGateway({ token, upstream, fetchImpl = fetch }) {
       }
       const body = Buffer.concat(chunks).toString('utf8');
       JSON.parse(body); // Never relay upstream HTML or invalid JSON to a browser client.
-      respond(200, body);
+      respond(response.status, body);
     } catch {
       respond(502, { error: 'LifeOS is unavailable' });
     }
@@ -51,6 +89,6 @@ export function createGateway({ token, upstream, fetchImpl = fetch }) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const server = createGateway({ token: process.env.LIFE_OS_GATEWAY_TOKEN, upstream: process.env.LIFE_OS_VM_ORIGIN });
-  server.listen(Number(process.env.PORT ?? 8080), '0.0.0.0', () => console.log('LifeOS readonly gateway ready'));
+  const server = createGateway({ token: process.env.LIFE_OS_GATEWAY_TOKEN, upstream: process.env.LIFE_OS_VM_ORIGIN, release: process.env.LIFE_OS_RELEASE_SHA });
+  server.listen(Number(process.env.PORT ?? 8080), '0.0.0.0', () => console.log('LifeOS web gateway ready'));
 }
