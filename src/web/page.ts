@@ -331,6 +331,18 @@ export const PORTAL_HTML = `<!doctype html>
   button:disabled { cursor: not-allowed; opacity: .45; }
   .focus-controls { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 20px; }
   .focus-controls .danger-text { padding-left: 0; font-size: 12px; }
+  .focus-help { color: var(--muted); font-size: 12px; margin: -8px 0 14px; }
+  .focus-help + .focus-help { margin-top: 0; }
+  .focus-results { max-height: 260px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--rule); margin: 0 0 18px; }
+  .focus-option { display: grid; width: 100%; min-height: 64px; gap: 3px; text-align: left; padding: 12px 14px; color: var(--ink); background: var(--surface-deep); border: 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+  .focus-option:last-child { border-bottom: 0; }
+  .focus-option:hover, .focus-option.is-active, .focus-option[aria-selected="true"] { background: var(--accent-soft); box-shadow: inset 3px 0 var(--accent); }
+  .focus-option strong { font-size: 14px; font-weight: 550; }
+  .focus-option > span { font-size: 12px; color: var(--muted); }
+  .focus-option .focus-option-kind { color: var(--amber); font: 10px var(--mono); text-transform: uppercase; letter-spacing: .06em; }
+  .focus-selection { display: grid; gap: 4px; padding: 12px 14px; margin: 0 0 18px; border-left: 3px solid var(--accent); background: var(--accent-soft); overflow-wrap: anywhere; }
+  .focus-selection > span, .focus-selection small { color: var(--muted); font-size: 12px; }
+  .focus-selection strong { font-size: 14px; font-weight: 550; }
   .section-actions, .task-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
   .section-actions { margin-bottom: 18px; }
   .task-item:has(.task-toggle) { grid-template-columns: 44px minmax(0, 1fr) auto; }
@@ -1192,7 +1204,9 @@ export const PORTAL_HTML = `<!doctype html>
     $("action-cancel").disabled = actionBusy;
     $("portal-footer").textContent = enabled ? "Private LifeOS console · Shared with your connected agents" : "Private LifeOS console · Read-only view · Make changes through your connected agent or the LifeOS CLI.";
     if (actionEditor) {
-      $("action-submit").disabled = !canAct();
+      const selection = actionEditor.focus?.selected;
+      const focusReady = !actionEditor.focus || actionEditor.uncertain || (selection && (selection.kind === 'task' || $('action-field-focusTitle').value.trim()));
+      $("action-submit").disabled = !canAct() || !focusReady;
       $("action-fields").disabled = actionBusy || actionEditor.uncertain === true;
       $("action-dialog").setAttribute("aria-busy", String(actionBusy));
     }
@@ -1233,19 +1247,78 @@ export const PORTAL_HTML = `<!doctype html>
     if (actionEditor?.uncertain) actionFeedback("The last request could not be confirmed. Refresh your data before trying that action again.", true);
     $("action-dialog").close(); actionEditor = null;
   }
+  // Focus always belongs to a task; project choices explicitly create a visible task.
+  function focusCatalog(snapshot, currentTaskId) {
+    const products = new Map(snapshot.products.map((item) => [item.id, item]));
+    const projects = new Map(snapshot.projects.map((item) => [item.id, item]));
+    const tasks = snapshot.tasks.filter((task) => task.status === 'open' && task.id !== currentTaskId);
+    const context = (project) => [products.get(project?.productId)?.name, project?.name].filter(Boolean).join(' › ') || 'No project';
+    const terms = (project) => [project?.id, project?.name, project?.productId, products.get(project?.productId)?.name].filter(Boolean);
+    return [
+      ...tasks.map((task) => { const project = projects.get(task.projectId); return { key: 'task:' + task.id, kind: 'task', id: task.id, title: task.title, context: context(project), search: [task.id, task.title, ...terms(project)] }; }),
+      ...snapshot.projects.map((project) => ({ key: 'project:' + project.id, kind: 'project', id: project.id, title: project.name, context: context(project), openTasks: tasks.filter((task) => task.projectId === project.id).length, search: terms(project) })),
+    ];
+  }
+  function focusSearch(catalog, query) {
+    const normalize = (value) => String(value || '').normalize('NFKD').replace(/[\\u0300-\\u036f]/g, '').toLowerCase().trim();
+    const needle = normalize(query), words = needle.split(/\\s+/).filter(Boolean);
+    const score = (row) => normalize(row.id) === needle || normalize(row.title) === needle ? 0 : normalize(row.title).startsWith(needle) ? 1 : words.every((word) => normalize(row.title).includes(word)) ? 2 : 3;
+    const matches = catalog.filter((row) => words.every((word) => row.search.some((term) => normalize(term).includes(word))))
+      .sort((a, b) => (needle ? score(a) - score(b) : 0) || (a.kind === b.kind ? 0 : a.kind === 'task' ? -1 : 1) || a.title.localeCompare(b.title) || a.key.localeCompare(b.key));
+    return { rows: matches.slice(0, 40), total: matches.length };
+  }
+  function focusStartInput(selected, title, note, expectedTimerRevision) {
+    if (!selected) throw new Error('Choose a task or a project first.');
+    const shared = { note, expectedTimerRevision };
+    if (selected.kind === 'task') return { taskId: selected.id, ...shared };
+    title = title.trim();
+    if (!title || title.length > 500) throw new Error('Give the new task a title of 1 to 500 characters.');
+    return { newTask: { title, ...(selected.kind === 'project' ? { projectId: selected.id } : {}) }, ...shared };
+  }
+  function renderFocusPicker() {
+    const editor = actionEditor, picker = editor?.focus;
+    if (!picker) return;
+    const result = focusSearch(picker.catalog, picker.query);
+    picker.rows = [...result.rows, { key: 'new', kind: 'new', title: 'Create an unassigned task', context: 'No project · choose a title below' }];
+    const list = $('focus-results'), search = $('action-field-focusSearch');
+    list.hidden = !picker.open;
+    search.setAttribute('aria-expanded', String(picker.open));
+    const activeId = picker.open && picker.activeIndex >= 0 ? 'focus-option-' + picker.activeIndex : null;
+    if (activeId) search.setAttribute('aria-activedescendant', activeId); else search.removeAttribute('aria-activedescendant');
+    $('focus-search-status').textContent = result.total ? (result.total > 40 ? 'Showing 40 of ' + result.total + ' matches. Refine your search.' : result.total + ' ' + (result.total === 1 ? 'match' : 'matches') + '.') : 'No matching tasks or projects. You can create an unassigned task.';
+    list.innerHTML = picker.rows.map((row, index) => '<button type="button" role="option" tabindex="-1" id="focus-option-' + index + '" data-focus-option="' + index + '" aria-selected="' + (picker.selected?.key === row.key) + '" class="focus-option' + (index === picker.activeIndex ? ' is-active' : '') + '"><span class="focus-option-kind">' + (row.kind === 'task' ? 'Task · ' + esc(row.id) : row.kind === 'project' ? 'Project · ' + row.openTasks + ' available ' + (row.openTasks === 1 ? 'task' : 'tasks') : 'New task') + '</span><strong>' + esc(row.title) + '</strong><span>' + esc(row.context) + (row.kind === 'project' ? ' · Create a task here' : '') + '</span></button>').join('');
+    const selected = picker.selected, creating = !!selected && selected.kind !== 'task';
+    $('focus-selection').hidden = !selected;
+    $('focus-selection').innerHTML = selected ? '<span>' + (creating ? 'New task in' : 'Selected task') + '</span><strong>' + esc(creating ? selected.kind === 'project' ? selected.title : 'No project' : selected.title) + '</strong><small>' + esc(selected.context) + '</small>' : '';
+    $('focus-new-task').hidden = !creating;
+    const title = $('action-field-focusTitle'); title.required = creating; title.disabled = !creating;
+    editor.submit = creating ? 'Create task and start' : picker.switching ? 'Save current and start' : 'Start focus';
+    if (!actionBusy && !editor.uncertain) $('action-submit').textContent = editor.submit;
+    refreshActionControls();
+  }
+  function selectFocusOption(index) {
+    const picker = actionEditor?.focus;
+    if (!picker || !canAct() || actionEditor.uncertain) return;
+    const selected = picker.rows[index]; if (!selected) return;
+    picker.selected = selected; picker.open = false; picker.activeIndex = -1;
+    if (selected.kind === 'new' && !$('action-field-focusTitle').value) $('action-field-focusTitle').value = picker.query.trim();
+    renderFocusPicker();
+    (selected.kind === 'task' ? $('action-submit') : $('action-field-focusTitle')).focus();
+  }
   function openFocusEditor(taskId) {
     if (!canAct()) return;
-    const timer = data.activeTimer;
-    const choices = data.tasks.filter((t) => t.status === "open" && t.id !== timer?.taskId);
-    if (!choices.length) { openTaskEditor(); actionFeedback("Add an open task to start a focus session."); return; }
-    const selected = choices.some((t) => t.id === taskId) ? taskId : choices[0].id;
-    const options = choices.map((t) => '<option value="' + esc(t.id) + '"' + (t.id === selected ? ' selected' : '') + '>' + esc(t.title) + '</option>').join("");
-    const current = timer && data.tasks.find((t) => t.id === timer.taskId);
-    openActionEditor({ title: timer ? "Switch focus" : "Start focus", submit: timer ? "Save current and start" : "Start focus", action: "timer.start",
-      description: timer ? 'Your current session on “' + (current?.title || timer.taskId) + '” will be saved when the new session starts.' : "Choose a task. Your session keeps running when you close LifeOS.",
-      fields: field("Task", '<select name="taskId" required>' + options + '</select>') + field("Session note · optional", notesControl("note", "")),
-      input: (form) => ({ taskId: form.get("taskId"), note: String(form.get("note") || ""), expectedTimerRevision: timer?.revision ?? null }),
+    const timer = data.activeTimer, catalog = focusCatalog(data, timer?.taskId);
+    const selected = catalog.find((row) => row.kind === 'task' && row.id === taskId) || null;
+    const picker = { catalog, selected, query: '', rows: [], activeIndex: -1, open: !selected, switching: !!timer };
+    const current = timer && data.tasks.find((task) => task.id === timer.taskId);
+    openActionEditor({ title: timer ? 'Switch focus' : 'Start focus', submit: timer ? 'Save current and start' : 'Start focus', action: 'timer.start',
+      description: timer ? 'Your current session on “' + (current?.title || timer.taskId) + '” will be saved when the new session starts.' : 'Choose a task, or create one in a project. Your session keeps running when you close LifeOS.',
+      fields: field('Search tasks, projects, or products', inputControl('focusSearch', '', 'type="search" maxlength="500" role="combobox" aria-autocomplete="list" aria-controls="focus-results" aria-expanded="true" aria-describedby="focus-search-help focus-search-status" autocomplete="off" autocapitalize="off"')) + '<p id="focus-search-help" class="focus-help">Search names or IDs. Choose a project to create a task in it.</p><p id="focus-search-status" class="focus-help" role="status" aria-live="polite"></p><div id="focus-results" class="focus-results" role="listbox" aria-label="Focus search results"></div><div id="focus-selection" class="focus-selection" hidden></div><div id="focus-new-task" hidden>' + field('New task title', inputControl('focusTitle', '', 'maxlength="500"'), 'This task will appear in Tasks, with your focus time attached.') + '</div>' + field('Session note · optional', notesControl('note', '')),
+      input: (form) => focusStartInput(picker.selected, String(form.get('focusTitle') || ''), String(form.get('note') || ''), timer?.revision ?? null),
     });
+    actionEditor.focus = picker;
+    renderFocusPicker();
+    (selected ? $('action-submit') : $('action-field-focusSearch')).focus();
   }
   function openStopEditor(discard = false) {
     const timer = data?.activeTimer;
@@ -1490,6 +1563,38 @@ export const PORTAL_HTML = `<!doctype html>
   $("dialog-body").addEventListener("click", (event) => {
     const edit = event.target.closest("[data-entry-edit]"); if (edit) openTimeEditor(edit.dataset.entryEdit);
     if (event.target.closest("[data-log-time]")) openTimeEditor();
+  });
+  $("action-fields").addEventListener("input", (event) => {
+    const picker = actionEditor?.focus;
+    if (!picker || actionBusy || actionEditor.uncertain) return;
+    if (event.target.name === 'focusSearch') {
+      picker.query = event.target.value; picker.selected = null; picker.open = true; picker.activeIndex = -1;
+      renderFocusPicker();
+    } else if (event.target.name === 'focusTitle') refreshActionControls();
+  });
+  $("action-fields").addEventListener("focusin", (event) => {
+    const picker = actionEditor?.focus;
+    if (picker && !actionBusy && !actionEditor.uncertain && event.target.name === 'focusSearch' && !picker.open) {
+      picker.open = true; renderFocusPicker();
+    }
+  });
+  $("action-fields").addEventListener("click", (event) => {
+    const option = event.target.closest('[data-focus-option]');
+    if (option) selectFocusOption(Number(option.dataset.focusOption));
+  });
+  $("action-fields").addEventListener("keydown", (event) => {
+    const picker = actionEditor?.focus;
+    if (!picker || event.target.name !== 'focusSearch' || actionBusy || actionEditor.uncertain) return;
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault(); picker.open = true;
+      picker.activeIndex = event.key === 'ArrowDown' ? Math.min(picker.activeIndex + 1, picker.rows.length - 1) : picker.activeIndex < 0 ? picker.rows.length - 1 : Math.max(0, picker.activeIndex - 1);
+      renderFocusPicker(); $('focus-option-' + picker.activeIndex)?.scrollIntoView({ block: 'nearest' });
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      if (picker.open && picker.activeIndex >= 0) selectFocusOption(picker.activeIndex);
+    } else if (event.key === 'Escape' && picker.open) {
+      event.preventDefault(); event.stopPropagation(); picker.open = false; picker.activeIndex = -1; renderFocusPicker();
+    }
   });
   $("action-form").addEventListener("submit", submitAction);
   $("action-close").addEventListener("click", closeActionEditor);

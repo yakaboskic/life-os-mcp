@@ -15,7 +15,11 @@ export const actionEnvelope = z.object({
   input: z.record(z.unknown()),
 }).strict();
 const schemas = {
-  "timer.start": z.object({ taskId: id, note: note.optional(), expectedTimerRevision: revision.nullable() }).strict(),
+  "timer.start": z.union([
+    z.object({ taskId: id, note: note.optional(), expectedTimerRevision: revision.nullable() }).strict(),
+    z.object({ newTask: z.object({ title: z.string().trim().min(1).max(500), projectId: id.optional() }).strict(),
+      note: note.optional(), expectedTimerRevision: revision.nullable() }).strict(),
+  ]),
   "timer.stop": z.object({ expectedTimerRevision: revision, note: note.optional() }).strict(),
   "timer.cancel": z.object({ expectedTimerRevision: revision }).strict(),
   "task.create": z.object({ title: z.string().trim().min(1).max(500), projectId: id.optional(), notes: note.optional() }).strict(),
@@ -89,9 +93,18 @@ export class TrackerActions {
   }
   private apply(action: keyof typeof schemas, input: any): unknown {
     switch (action) {
-      case "timer.start":
-        this.task(input.taskId); this.expectTimer(input.expectedTimerRevision);
+      case "timer.start": {
+        this.expectTimer(input.expectedTimerRevision);
+        // Task creation, a possible switch, and the receipt share the outer transaction.
+        // A stale timer or a lost response must never leave a duplicate/orphan task.
+        if (input.newTask) {
+          this.project(input.newTask.projectId);
+          const task = this.store.addTask({ title: input.newTask.title, project: input.newTask.projectId });
+          return this.store.startTimer(task.id, input.note);
+        }
+        this.task(input.taskId);
         return this.store.startTimer(input.taskId, input.note);
+      }
       case "timer.stop": this.expectTimer(input.expectedTimerRevision); return this.store.stopTimer(input.note);
       case "timer.cancel": this.expectTimer(input.expectedTimerRevision); return this.store.cancelTimer();
       case "task.create":
