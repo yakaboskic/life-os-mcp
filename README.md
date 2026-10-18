@@ -6,7 +6,7 @@ Production runtime uses Node 24, SQLite, systemd, and a private GCP VM. Pushes t
 
 The Starfleet dashboard is an installable PWA. Its [Vercel web gateway](web-app/README.md) supports Google sign-in restricted to the configured owner; the VM retains all live data. SSH access and browser access use separate credentials.
 
-The authenticated dashboard can start, switch and stop focus sessions; create, edit and complete tasks; and log or correct time. Browser and MCP actions share the same transactional tracker. Version checks prevent stale edits, and durable request receipts make retries safe. The standalone `life-os web` command remains read-only.
+The authenticated dashboard can create projects; search projects when creating or editing tasks; start, switch and stop focus sessions; complete tasks; and log or correct time. Browser and MCP actions share the same transactional tracker. Version checks prevent stale edits, and durable request receipts make retries safe. See the [project and task POST examples](web-app/README.md#creating-projects-and-tasks). The standalone `life-os web` command remains read-only.
 
 Optional VM automations review held Gmail classifications and produce a daily brief in the dashboard and the operator's configured inbox. Initial classification stays with Jev; Claude reviews only eligible uncertain classifications. Configure a native Claude Code login in the dedicated runner account, or choose the separately billed Claude API provider. Named jobs have durable state, bounded usage, recovery and delivery reconciliation; the agent never receives Gmail credentials or arbitrary send authority.
 

@@ -10,7 +10,7 @@ const note = z.string().max(20_000);
 const instant = z.string().datetime({ offset: true }).refine(value => Number.isFinite(Date.parse(value)));
 export const actionEnvelope = z.object({
   requestId: z.string().regex(/^[a-zA-Z0-9_-]{8,128}$/),
-  action: z.enum(["timer.start", "timer.stop", "timer.cancel", "task.create", "task.update", "time.log", "time.update",
+  action: z.enum(["timer.start", "timer.stop", "timer.cancel", "project.create", "task.create", "task.update", "time.log", "time.update",
     "automation.run", "automation.schedule", "review.resolve"]),
   input: z.record(z.unknown()),
 }).strict();
@@ -22,6 +22,8 @@ const schemas = {
   ]),
   "timer.stop": z.object({ expectedTimerRevision: revision, note: note.optional() }).strict(),
   "timer.cancel": z.object({ expectedTimerRevision: revision }).strict(),
+  "project.create": z.object({ name: z.string().trim().min(1).max(200), productId: id.optional(),
+    goal: z.string().max(2_000).optional(), notes: note.optional() }).strict(),
   "task.create": z.object({ title: z.string().trim().min(1).max(500), projectId: id.optional(), notes: note.optional() }).strict(),
   "task.update": z.object({ taskId: id, expectedRevision: revision, title: z.string().trim().min(1).max(500).optional(),
     projectId: id.nullable().optional(), notes: note.optional(), status: z.enum(["open", "done"]).optional(),
@@ -107,6 +109,18 @@ export class TrackerActions {
       }
       case "timer.stop": this.expectTimer(input.expectedTimerRevision); return this.store.stopTimer(input.note);
       case "timer.cancel": this.expectTimer(input.expectedTimerRevision); return this.store.cancelTimer();
+      case "project.create": {
+        const registry = this.store.loadRegistry();
+        if (input.productId && !registry.products.some(product => product.id === input.productId)) {
+          throw new ActionError("This product no longer exists.", 404, "PRODUCT_MISSING");
+        }
+        // The outer immediate transaction serializes this check with creation,
+        // including projects created concurrently through an MCP client.
+        if (registry.projects.some(project => project.name.trim().toLowerCase() === input.name.toLowerCase())) {
+          throw new ActionError("A project with this name already exists. Use the existing project.", 409, "PROJECT_EXISTS");
+        }
+        return this.store.addProject({ name: input.name, product: input.productId, goal: input.goal, notes: input.notes });
+      }
       case "task.create":
         this.project(input.projectId);
         return this.store.addTask({ title: input.title, project: input.projectId, notes: input.notes });

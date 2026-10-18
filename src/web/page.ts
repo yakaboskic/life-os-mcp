@@ -151,6 +151,7 @@ export const PORTAL_HTML = `<!doctype html>
   .duerow .due.late { color: var(--red); }
   .portfolio-section { margin-top: 28px; padding-top: 24px; border-top: 1px solid var(--rule); }
   .portfolio-heading { display: flex; align-items: end; justify-content: space-between; gap: 18px; margin-bottom: 18px; }
+  .portfolio-heading .section-actions { margin: 0; justify-content: flex-end; }
   .portfolio-heading h2 { margin: 0; font-size: 19px; }
   .quiet-button { border: 1px solid var(--rule); border-radius: 2px 8px 2px 2px; background: var(--surface-deep); color: var(--ink-2); padding: 8px 12px; font: 500 12px var(--sans); }
   .quiet-button:hover { color: var(--ink); border-color: var(--accent); }
@@ -299,7 +300,7 @@ export const PORTAL_HTML = `<!doctype html>
     .time-secondary > section { padding: 18px; }
     .queue-card { position: static; }
     .briefing-card { padding: 22px; }
-    .portfolio-heading { align-items: center; }
+    .portfolio-heading { align-items: center; flex-wrap: wrap; }
     #portfolio { grid-template-columns: 1fr; }
     .task-item { grid-template-columns: 12px minmax(0, 1fr); padding: 16px; gap: 0 10px; }
     .task-age { grid-column: 2; padding-top: 8px; }
@@ -453,7 +454,7 @@ export const PORTAL_HTML = `<!doctype html>
       <section class="panel"><h2>Needs a check-in</h2><div id="checkins"></div></section>
     </div>
     <section class="portfolio-section">
-      <div class="portfolio-heading"><div><span class="section-kicker">Details</span><h2>Portfolio</h2></div><button class="quiet-button" id="recent-time-button" type="button">View recent time</button></div>
+      <div class="portfolio-heading"><div><span class="section-kicker">Details</span><h2>Projects</h2></div><div class="section-actions"><button class="action-button" id="new-project-button" type="button" data-write-control data-project-create hidden>New project</button><button class="quiet-button" id="recent-time-button" type="button">View recent time</button></div></div>
       <div id="portfolio"></div>
       <div id="entries" hidden></div>
     </section>
@@ -1197,7 +1198,7 @@ export const PORTAL_HTML = `<!doctype html>
   }
   function refreshActionControls() {
     const enabled = !!data?.capabilities?.actions;
-    document.querySelectorAll("[data-write-control]").forEach((el) => { el.hidden = !enabled; el.disabled = !canAct() || el.hasAttribute("data-current-focus") || el.hasAttribute("data-review-unavailable") || ((el.hasAttribute("data-automation-run") || el.hasAttribute("data-automation-settings") || el.hasAttribute("data-review-item")) && (!automationAvailable || automation?.paused || (el.hasAttribute("data-automation-run") && !automation?.configured))); });
+    document.querySelectorAll("[data-write-control]").forEach((el) => { el.hidden = !enabled || (el.hasAttribute("data-project-create") && data?.capabilities?.projectCreate !== true); el.disabled = !canAct() || el.hasAttribute("data-current-focus") || el.hasAttribute("data-review-unavailable") || ((el.hasAttribute("data-automation-run") || el.hasAttribute("data-automation-settings") || el.hasAttribute("data-review-item")) && (!automationAvailable || automation?.paused || (el.hasAttribute("data-automation-run") && !automation?.configured))); });
     $("session-notice").hidden = !authExpired;
     $("action-session").hidden = !authExpired;
     $("action-close").disabled = actionBusy;
@@ -1206,7 +1207,7 @@ export const PORTAL_HTML = `<!doctype html>
     if (actionEditor) {
       const selection = actionEditor.focus?.selected;
       const focusReady = !actionEditor.focus || actionEditor.uncertain || (selection && (selection.kind === 'task' || $('action-field-focusTitle').value.trim()));
-      $("action-submit").disabled = !canAct() || !focusReady;
+      $("action-submit").disabled = !canAct() || !focusReady || (actionEditor.action === "project.create" && data?.capabilities?.projectCreate !== true);
       $("action-fields").disabled = actionBusy || actionEditor.uncertain === true;
       $("action-dialog").setAttribute("aria-busy", String(actionBusy));
     }
@@ -1330,21 +1331,89 @@ export const PORTAL_HTML = `<!doctype html>
       input: (form) => ({ expectedTimerRevision: timer.revision, ...(discard ? {} : { note: String(form.get("note") || "") }) }),
     });
   }
+  function projectCatalog(snapshot) {
+    const products = new Map(snapshot.products.map((item) => [item.id, item]));
+    return snapshot.projects.map((project) => {
+      const product = products.get(project.productId);
+      return { key: 'project:' + project.id, kind: 'project', id: project.id, title: project.name,
+        context: (product?.name || 'Independent project') + ' · ' + project.id,
+        search: [project.id, project.name, project.productId, product?.name].filter(Boolean) };
+    });
+  }
+  function taskEditorInput(form, task, selected) {
+    const title = String(form.get('title') || '').trim();
+    if (!title || title.length > 500) throw new Error('Give the task a title of 1 to 500 characters.');
+    // Search text is a filter only. Only a deliberately selected row supplies an ID.
+    const projectId = selected?.id || null, notes = String(form.get('notes') || '');
+    return task ? { taskId: task.id, expectedRevision: task.revision, title, projectId, notes }
+      : { title, ...(projectId ? { projectId } : {}), notes };
+  }
+  function projectCreateInput(form) {
+    const name = String(form.get('name') || '').trim(), productId = String(form.get('productId') || '');
+    const goal = String(form.get('goal') || ''), notes = String(form.get('notes') || '');
+    if (!name || name.length > 200) throw new Error('Give the project a name of 1 to 200 characters.');
+    if (goal.length > 2000 || notes.length > 20000) throw new Error('Keep the goal under 2,000 characters and notes under 20,000 characters.');
+    return { name, ...(productId ? { productId } : {}), ...(goal ? { goal } : {}), ...(notes ? { notes } : {}) };
+  }
+  function renderProjectPicker() {
+    const picker = actionEditor?.project;
+    if (!picker) return;
+    const result = focusSearch(picker.catalog, picker.query);
+    picker.rows = [...result.rows, { key: 'none', kind: 'none', id: null, title: 'No project', context: 'Keep this task unassigned' }];
+    const list = $('project-results'), search = $('action-field-projectSearch');
+    list.hidden = !picker.open; search.setAttribute('aria-expanded', String(picker.open));
+    if (picker.open && picker.activeIndex >= 0) search.setAttribute('aria-activedescendant', 'project-option-' + picker.activeIndex);
+    else search.removeAttribute('aria-activedescendant');
+    $('project-search-status').textContent = result.total ? (result.total > 40 ? 'Showing 40 of ' + result.total + ' projects. Refine your search.' : result.total + (result.total === 1 ? ' project found.' : ' projects found.')) : 'No matching projects. You can keep this task unassigned.';
+    list.innerHTML = picker.rows.map((row, index) => '<button type="button" role="option" tabindex="-1" id="project-option-' + index + '" data-project-option="' + index + '" aria-selected="' + ((picker.selected?.id || null) === row.id) + '" class="focus-option' + (index === picker.activeIndex ? ' is-active' : '') + '"><strong>' + esc(row.title) + '</strong><span>' + esc(row.context) + '</span></button>').join('');
+    const selected = picker.selected;
+    $('project-selection').innerHTML = '<span>Selected project</span><strong>' + esc(selected?.title || 'No project') + '</strong><small>' + esc(selected?.id ? selected.context : 'This task will not belong to a project.') + '</small><div><button id="project-change" type="button" class="text-button">Change project</button>' + (selected?.id ? '<button id="project-clear" type="button" class="text-button">No project</button>' : '') + '</div>';
+  }
+  function selectProjectOption(index) {
+    const picker = actionEditor?.project;
+    if (!picker || !canAct() || actionEditor.uncertain) return;
+    const selected = picker.rows[index]; if (!selected) return;
+    picker.selected = selected.id ? selected : null; picker.open = false; picker.activeIndex = -1; picker.query = '';
+    $('action-field-projectSearch').value = '';
+    renderProjectPicker(); $('action-field-notes').focus();
+  }
+  function projectPickerKey(event) {
+    const picker = actionEditor?.project;
+    if (!picker || event.target.name !== 'projectSearch' || !canAct() || actionEditor.uncertain) return;
+    if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+      event.preventDefault(); picker.open = true;
+      picker.activeIndex = event.key === 'Home' ? 0 : event.key === 'End' ? picker.rows.length - 1
+        : event.key === 'ArrowDown' ? Math.min(picker.activeIndex + 1, picker.rows.length - 1)
+        : picker.activeIndex < 0 ? picker.rows.length - 1 : Math.max(0, picker.activeIndex - 1);
+      renderProjectPicker(); $('project-option-' + picker.activeIndex)?.scrollIntoView({ block: 'nearest' });
+    } else if (event.key === 'Enter') {
+      event.preventDefault(); if (picker.open && picker.activeIndex >= 0) selectProjectOption(picker.activeIndex);
+    } else if (event.key === 'Escape' && picker.open) {
+      event.preventDefault(); event.stopPropagation(); picker.open = false; picker.activeIndex = -1; renderProjectPicker();
+    } else if (event.key === 'Tab' && picker.open) {
+      picker.open = false; picker.activeIndex = -1; renderProjectPicker();
+    }
+  }
   function openTaskEditor(taskId) {
     const task = taskId ? data?.tasks.find((t) => t.id === taskId) : null;
     if (!canAct() || (taskId && !task)) return;
-    const options = '<option value="">No project</option>' + data.projects.map((p) => '<option value="' + esc(p.id) + '"' + (p.id === task?.projectId ? ' selected' : '') + '>' + esc(p.name) + '</option>').join("");
+    const catalog = projectCatalog(data);
+    const selected = catalog.find((row) => row.id === task?.projectId) || (task?.projectId ? { id: task.projectId, title: 'Unavailable project', context: task.projectId } : null);
+    const picker = { catalog, selected, query: '', rows: [], activeIndex: -1, open: false };
     openActionEditor({ title: task ? "Edit task" : "New task", submit: task ? "Save changes" : "Create task", action: task ? "task.update" : "task.create",
       description: task ? "Update the task without changing its source links unless you edit its notes." : "Give this task a clear outcome. You can start a focus session on it next.",
-      fields: field("Title", inputControl("title", task?.title, 'required maxlength="500"')) + field("Project", '<select name="projectId">' + options + '</select>') + field("Notes · optional", notesControl("notes", task?.notes)),
-      input: (form) => {
-        const title = String(form.get("title") || "").trim();
-        if (!title) throw new Error("Give the task a title.");
-        const projectId = String(form.get("projectId") || "");
-        const notes = String(form.get("notes") || "");
-        return task ? { taskId: task.id, expectedRevision: task.revision, title, projectId: projectId || null, notes }
-          : { title, ...(projectId ? { projectId } : {}), notes };
-      },
+      fields: field('Title', inputControl('title', task?.title, 'required maxlength="500"')) + field('Search projects', inputControl('projectSearch', '', 'type="search" maxlength="500" role="combobox" aria-autocomplete="list" aria-controls="project-results" aria-expanded="false" aria-describedby="project-search-help project-search-status" autocomplete="off" autocapitalize="off"')) + '<p id="project-search-help" class="focus-help">Search project names, IDs, or products. Searching keeps the selection below until you choose a result.</p><p id="project-search-status" class="focus-help" role="status" aria-live="polite"></p><div id="project-results" class="focus-results" role="listbox" aria-label="Project search results" hidden></div><div id="project-selection" class="focus-selection"></div>' + field('Notes · optional', notesControl('notes', task?.notes)),
+      input: (form) => taskEditorInput(form, task, picker.selected),
+    });
+    actionEditor.project = picker; renderProjectPicker();
+  }
+  function openProjectEditor() {
+    if (!canAct() || data?.capabilities?.projectCreate !== true) return;
+    const products = '<option value="">No product</option>' + data.products.map((product) => '<option value="' + esc(product.id) + '">' + esc(product.name) + ' · ' + esc(product.id) + '</option>').join('');
+    openActionEditor({ title: 'New project', submit: 'Create project', action: 'project.create',
+      description: 'Create a project for related tasks and focus sessions. You can connect it to a product or keep it independent.',
+      fields: field('Name', inputControl('name', '', 'required maxlength="200"')) + field('Product · optional', '<select name="productId">' + products + '</select>') + field('Goal · optional', '<textarea name="goal" rows="2" maxlength="2000"></textarea>') + field('Notes · optional', notesControl('notes', '')),
+      input: projectCreateInput,
     });
   }
   function toggleTask(taskId) {
@@ -1381,7 +1450,7 @@ export const PORTAL_HTML = `<!doctype html>
   async function submitAction(event) {
     event.preventDefault();
     const editor = actionEditor;
-    if (!editor || !canAct()) return;
+    if (!editor || !canAct() || (editor.action === "project.create" && data?.capabilities?.projectCreate !== true)) return;
     const errorEl = $("action-error");
     let dispatched = false;
     try {
@@ -1395,7 +1464,7 @@ export const PORTAL_HTML = `<!doctype html>
       if (!res.ok) {
         if (res.status === 401) { authExpired = true; throw Object.assign(new Error("Your session expired. Sign in again, then retry this request."), { known: true }); }
         const reason = actionErrorMessage(receipt.code || receipt.error, String(receipt.error || "The change could not be saved."));
-        const changed = res.status === 409 && !editor.action.startsWith("automation.") && editor.action !== "review.resolve";
+        const changed = res.status === 409 && editor.action !== "project.create" && !editor.action.startsWith("automation.") && editor.action !== "review.resolve";
         const message = changed ? reason + " Your draft is preserved. Close this form and reopen it to use the latest version." : reason;
         throw Object.assign(new Error(message), { known: res.status < 500 });
       }
@@ -1559,12 +1628,17 @@ export const PORTAL_HTML = `<!doctype html>
     const item = event.target.closest("[data-review-item]"); if (item) openReviewEditor(item.dataset.reviewItem);
   });
   $("new-task-button").addEventListener("click", () => openTaskEditor());
+  $("new-project-button").addEventListener("click", openProjectEditor);
   $("log-time-button").addEventListener("click", () => openTimeEditor());
   $("dialog-body").addEventListener("click", (event) => {
     const edit = event.target.closest("[data-entry-edit]"); if (edit) openTimeEditor(edit.dataset.entryEdit);
     if (event.target.closest("[data-log-time]")) openTimeEditor();
   });
   $("action-fields").addEventListener("input", (event) => {
+    const project = actionEditor?.project;
+    if (project && canAct() && !actionEditor.uncertain && event.target.name === 'projectSearch') {
+      project.query = event.target.value; project.open = true; project.activeIndex = -1; renderProjectPicker();
+    }
     const picker = actionEditor?.focus;
     if (!picker || actionBusy || actionEditor.uncertain) return;
     if (event.target.name === 'focusSearch') {
@@ -1573,15 +1647,27 @@ export const PORTAL_HTML = `<!doctype html>
     } else if (event.target.name === 'focusTitle') refreshActionControls();
   });
   $("action-fields").addEventListener("focusin", (event) => {
+    const project = actionEditor?.project;
+    if (project && canAct() && !actionEditor.uncertain && event.target.name === 'projectSearch' && !project.open) {
+      project.open = true; renderProjectPicker();
+    }
     const picker = actionEditor?.focus;
     if (picker && !actionBusy && !actionEditor.uncertain && event.target.name === 'focusSearch' && !picker.open) {
       picker.open = true; renderFocusPicker();
     }
   });
   $("action-fields").addEventListener("click", (event) => {
+    const project = actionEditor?.project;
+    const projectOption = event.target.closest('[data-project-option]');
+    if (projectOption) selectProjectOption(Number(projectOption.dataset.projectOption));
+    if (project && canAct() && !actionEditor.uncertain) {
+      if (event.target.closest('#project-clear')) selectProjectOption(project.rows.length - 1);
+      if (event.target.closest('#project-change')) { project.open = true; renderProjectPicker(); $('action-field-projectSearch').focus(); }
+    }
     const option = event.target.closest('[data-focus-option]');
     if (option) selectFocusOption(Number(option.dataset.focusOption));
   });
+  $("action-fields").addEventListener("keydown", projectPickerKey);
   $("action-fields").addEventListener("keydown", (event) => {
     const picker = actionEditor?.focus;
     if (!picker || event.target.name !== 'focusSearch' || actionBusy || actionEditor.uncertain) return;

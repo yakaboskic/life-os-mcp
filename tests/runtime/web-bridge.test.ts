@@ -54,9 +54,19 @@ describe("private browser action capability", () => {
     const result = await send(`${base}/api/actions`, { method: "POST", headers: headers(), body });
     expect(result.status).toBe(status); expect(await result.json()).toEqual({ error: "ACTION_REJECTED" });
   });
+  it.each([{status:409,code:"PROJECT_EXISTS"},{status:404,code:"PRODUCT_MISSING"}])("preserves a bounded structured action code: $code", async ({status,code}) => {
+    const base = await fixture({ executeAction: async () => { throw Object.assign(new Error("Action rejected"), { status, code }); } });
+    const result = await send(`${base}/api/actions`, { method: "POST", headers: headers(), body });
+    expect(result.status).toBe(status); expect(await result.json()).toEqual({error:"Action rejected",code});
+  });
+  it.each(["secret/path", "PRIVATE\nVALUE", "X".repeat(65), 42])("does not forward an invalid structured error code: %s", async code => {
+    const base = await fixture({ executeAction: async () => { throw Object.assign(new Error("Action rejected"), { status:409, code }); } });
+    const result = await send(`${base}/api/actions`, { method:"POST",headers:headers(),body });
+    expect(result.status).toBe(409); expect(await result.json()).toEqual({error:"Action rejected"});
+  });
   it("hides unexpected callback exceptions", async () => {
-    const base = await fixture({ executeAction: async () => { throw new Error("secret filesystem path"); } });
-    const result = await send(`${base}/api/actions`, { method: "POST", headers: headers(), body }); expect(result.status).toBe(503); expect(await result.text()).not.toContain("secret");
+    const base = await fixture({ executeAction: async () => { throw Object.assign(new Error("secret filesystem path"), {code:"PRIVATE_LOCATION",status:500}); } });
+    const result = await send(`${base}/api/actions`, { method: "POST", headers: headers(), body }); expect(result.status).toBe(503); expect(await result.json()).toEqual({error:"LifeOS unavailable"});
   });
   it("continues to proxy only safe read routes, including automation", async () => {
     const upstream = createServer((req, res) => { expect(req.method).toBe("GET"); expect(req.url).toBe("/api/automation"); res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ runs: [] })); });
@@ -64,12 +74,12 @@ describe("private browser action capability", () => {
     const base = `http://127.0.0.1:${await listen(createPrivateWebBridge(token, host, webPort))}`;
     const result = await send(`${base}/api/automation`, { headers: headers() }); expect(result.status).toBe(200); expect(await result.json()).toEqual({ runs: [] });
   });
-  it.each([true, false])("advertises actions only when this authenticated listener has its callback: %s", async (enabled) => {
-    const upstream = createServer((_req, res) => res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ tasks: [], capabilities: { actions: !enabled, automation: true } })));
+  it.each([true, false])("advertises actions and project creation only when this authenticated listener has its callback: %s", async (enabled) => {
+    const upstream = createServer((_req, res) => res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ tasks: [], capabilities: { actions: !enabled, projectCreate: !enabled, automation: true } })));
     const webPort = await listen(upstream);
     const options = enabled ? { executeAction: async () => ({ ok: true }) } : {};
     const base = `http://127.0.0.1:${await listen(createPrivateWebBridge(token, host, webPort, options))}`;
     const result = await send(`${base}/api/data`, { headers: headers() });
-    expect(result.status).toBe(200); expect(await result.json()).toEqual({ tasks: [], capabilities: { actions: enabled, automation: true } });
+    expect(result.status).toBe(200); expect(await result.json()).toEqual({ tasks: [], capabilities: { actions: enabled, projectCreate: enabled, automation: true } });
   });
 });

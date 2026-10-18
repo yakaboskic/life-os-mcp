@@ -45,3 +45,39 @@ Cloud Run and the VM independently enforce the route/method allowlists, body bou
 The VM and gateway deploy sequentially through GitHub, while Vercel deploys independently from the same repository. New UI controls use backend capabilities so an older VM stays usable during rollout. See the [operations runbook](../docs/gcp-operations.md#gateway-deployment-from-github) for enabling the gateway's verified-image deployment stage.
 
 Authenticated HTML, API responses and auth responses use private/no-store headers at the browser and Vercel CDN. The service worker caches only public icons and an offline explanation; tasks, email and dashboard snapshots are never cached for offline use. Missing or invalid configuration fails closed with a setup page.
+
+## Creating projects and tasks
+
+Choose **New project** in Projects to create a project with a name, optional product, goal and notes. In **New task** or **Edit task**, search by project name, ID, or product name, then select a result. **No project** leaves the task unassigned. Search text itself never becomes a project ID.
+
+The authenticated `POST /api/actions` endpoint accepts a `project.create` command:
+
+```json
+{
+  "requestId": "project-create-unique-id",
+  "action": "project.create",
+  "input": {
+    "name": "Launch planning",
+    "productId": "existing-product-id",
+    "goal": "Prepare the next release",
+    "notes": "Coordinate the release checklist"
+  }
+}
+```
+
+Only `name` is required; it is trimmed and must contain 1–200 characters. `productId` must be an exact existing product ID, `goal` permits up to 2,000 characters, and `notes` up to 20,000. Unknown input fields are rejected. A successful response is HTTP 200 with `ok: true`, the matching `requestId`, and the created project in `result`. Use `result.id` when creating a task:
+
+```json
+{
+  "requestId": "task-create-unique-id",
+  "action": "task.create",
+  "input": {
+    "title": "Prepare release checklist",
+    "projectId": "launch-planning"
+  }
+}
+```
+
+From JavaScript on the signed-in LifeOS page, send either command with `fetch('/api/actions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(command) })`. The browser supplies the session cookie and same-origin headers. Generate a fresh `requestId` with `crypto.randomUUID()` for each new command; retain the same ID and payload when retrying an uncertain response. Case-insensitive duplicate project names return HTTP 409 (`PROJECT_EXISTS`); an unknown product returns HTTP 404 (`PRODUCT_MISSING`). Neither creates a project.
+
+Connected agents can pass the same command object to `lifeos_action`, using `lifeos_snapshot` to discover product and project IDs. The public web endpoint requires a signed-in browser session; agent credentials stay on the existing private MCP connection.

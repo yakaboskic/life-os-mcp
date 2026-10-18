@@ -42,7 +42,9 @@ export function createPrivateWebBridge(token: string, privateHost: string, webPo
         req.resume();
         const status = (error as { status?: number }).status;
         const known = typeof status === "number" && RELAY_STATUSES.has(status) && status >= 400;
-        reply(known ? status : 503, { error: known && error instanceof Error ? error.message : "LifeOS unavailable" });
+        const code = (error as { code?: unknown }).code;
+        const safeCode = known && error instanceof Error && typeof code === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? code : undefined;
+        reply(known ? status : 503, { error: known && error instanceof Error ? error.message : "LifeOS unavailable", ...(safeCode ? { code: safeCode } : {}) });
       }
       return;
     }
@@ -59,7 +61,8 @@ export function createPrivateWebBridge(token: string, privateHost: string, webPo
         const capabilities = data.capabilities && typeof data.capabilities === "object" && !Array.isArray(data.capabilities) ? data.capabilities : {};
         // The loopback dashboard stays read-only. Only this authenticated path
         // has the authoritative callback needed to advertise interactive actions.
-        data.capabilities = { ...capabilities, actions: typeof options.executeAction === "function" };
+        const actions = typeof options.executeAction === "function";
+        data.capabilities = { ...capabilities, actions, projectCreate: actions };
       }
       reply(upstream.status, data);
     } catch { reply(503, { error: "LifeOS unavailable" }); }

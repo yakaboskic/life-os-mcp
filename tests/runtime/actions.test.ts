@@ -18,6 +18,74 @@ function fixture() {
 afterEach(()=>{vi.useRealTimers();for(const c of configs.splice(0)){closeDatabase(c);rmSync(c.home,{recursive:true,force:true});}});
 
 describe("shared tracker actions",()=>{
+  it("creates a project with an exact product link and durable actor-bound idempotency",()=>{
+    const {config,actions,agent,run}=fixture();
+    const product=agent.addProduct({name:"Synthetic product"});
+    const input={name:"  Mission café  ",productId:product.id,goal:"Ship a working demo",notes:"First note\nSecond note"};
+    const first=run("project.create",input,"create-project-1");
+    expect(first.result).toMatchObject({name:"Mission café",productId:product.id,goal:input.goal,notes:input.notes,id:expect.any(String),created_at:expect.any(String)});
+    expect(run("project.create",{...input,name:"Mission café"},"create-project-1")).toEqual(first);
+    expect(()=>run("project.create",{...input,name:"Different"},"create-project-1")).toThrow(expect.objectContaining({status:409,code:"REQUEST_CONFLICT"}));
+    expect(()=>actions.execute({requestId:"create-project-1",action:"project.create",input},"agent:interactive")).toThrow(expect.objectContaining({status:409,code:"REQUEST_CONFLICT"}));
+    expect(agent.loadRegistry().projects).toHaveLength(1);
+    closeDatabase(config);
+    const restarted=new TrackerActions(config);
+    expect(restarted.execute({requestId:"create-project-1",action:"project.create",input},"web:owner@example.com")).toEqual(first);
+    expect(restarted.store.loadRegistry().projects).toHaveLength(1);
+    expect(restarted.store.db.prepare("SELECT actor FROM action_receipts WHERE request_id=?").get("create-project-1")?.actor).toBe("web:owner@example.com");
+  });
+  it("creates an unassigned project without inventing a status and accepts bounded optional fields",()=>{
+    const {agent,run}=fixture();
+    const name="n".repeat(200),goal="g".repeat(2_000),notes="x".repeat(20_000);
+    run("project.create",{name,goal,notes});
+    const [project]=agent.loadRegistry().projects;
+    expect(project).toMatchObject({name,goal,notes});
+    expect(project?.productId).toBeUndefined();expect(project?.status).toBeUndefined();
+  });
+  it("rejects duplicate project names across clients and product groups without recording a receipt",()=>{
+    const {actions,agent,run}=fixture();
+    const product=agent.addProduct({name:"Other product"});
+    agent.addProject({name:"  Existing Project  "});
+    const before=agent.loadRegistry();
+    for(const name of ["existing project","EXISTING PROJECT"," Existing Project "]) {
+      expect(()=>run("project.create",{name,productId:product.id})).toThrow(expect.objectContaining({status:409,code:"PROJECT_EXISTS"}));
+    }
+    expect(agent.loadRegistry()).toEqual(before);
+    expect(actions.store.db.prepare("SELECT COUNT(*) AS n FROM action_receipts").get()?.n).toBe(0);
+  });
+  it("requires an exact product ID and lets a corrected request reuse its failed request ID",()=>{
+    const {actions,agent,run}=fixture();
+    const product=agent.addProduct({name:"Research and Development"});
+    for(const productId of ["missing",product.name,product.id.toUpperCase(),"research"]) {
+      expect(()=>run("project.create",{name:"Research project",productId},"invalid-product-1")).toThrow(expect.objectContaining({status:404,code:"PRODUCT_MISSING"}));
+    }
+    expect(agent.loadRegistry().projects).toEqual([]);
+    expect(actions.store.db.prepare("SELECT COUNT(*) AS n FROM action_receipts").get()?.n).toBe(0);
+    run("project.create",{name:"Research project",productId:product.id},"invalid-product-1");
+    expect(agent.loadRegistry().projects).toMatchObject([{name:"Research project",productId:product.id}]);
+  });
+  it("rejects invalid project fields without creating a project or receipt",()=>{
+    const {actions,agent,run}=fixture();const before=agent.loadRegistry();
+    for(const input of [
+      {},{name:"  "},{name:"n".repeat(201)},{name:42},
+      {name:"Project",goal:"g".repeat(2_001)},{name:"Project",notes:"n".repeat(20_001)},
+      {name:"Project",productId:""},{name:"Project",productId:null},{name:"Project",productId:"i".repeat(201)},
+      {name:"Project",description:"Unsupported"},{name:"Project",status:"active"},{name:"Project",id:"caller-id"},
+    ]) expect(()=>run("project.create",input)).toThrow(expect.objectContaining({status:400,code:"INVALID_ACTION"}));
+    expect(agent.loadRegistry()).toEqual(before);
+    expect(actions.store.db.prepare("SELECT COUNT(*) AS n FROM action_receipts").get()?.n).toBe(0);
+  });
+  it("rolls back project creation and receipt together if storage fails after the insert",()=>{
+    const {actions,agent,run}=fixture();const before=agent.loadRegistry();
+    const create=actions.store.addProject.bind(actions.store);
+    const failure=vi.spyOn(actions.store,"addProject").mockImplementation((...args)=>{create(...args);throw new Error("Storage failed after project insert");});
+    expect(()=>run("project.create",{name:"Retry project"},"rollback-project-1")).toThrow("Storage failed");
+    expect(agent.loadRegistry()).toEqual(before);
+    expect(actions.store.db.prepare("SELECT COUNT(*) AS n FROM action_receipts").get()?.n).toBe(0);
+    failure.mockRestore();
+    run("project.create",{name:"Retry project"},"rollback-project-1");
+    expect(agent.loadRegistry().projects).toMatchObject([{id:"retry-project",name:"Retry project"}]);
+  });
   it("persists receipts across clients and restarts without duplicating writes",()=>{
     const {config,actions,agent,run}=fixture();
     const first=run("task.create",{title:"  First task  "},"create-task-1");
