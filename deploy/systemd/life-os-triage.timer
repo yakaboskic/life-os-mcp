@@ -1,0 +1,11 @@
+[Unit]
+Description=LifeOS Gmail triage at 05:53 Eastern
+
+[Timer]
+OnCalendar=*-*-* 05:53:00 America/New_York
+Persistent=true
+AccuracySec=1s
+Unit=life-os-triage.service
+
+[Install]
+WantedBy=timers.target

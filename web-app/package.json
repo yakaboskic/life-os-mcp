@@ -1,0 +1,10 @@
+{
+  "name": "life-os-private-web",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": "24.x" },
+  "scripts": { "build": "tsc --noEmit", "typecheck": "tsc --noEmit" },
+  "dependencies": { "google-auth-library": "^10.9.0" },
+  "devDependencies": { "@types/node": "^24.0.0", "typescript": "^5.9.0" }
+}

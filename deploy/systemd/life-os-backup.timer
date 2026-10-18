@@ -1,0 +1,8 @@
+[Unit]
+Description=Hourly LifeOS backup
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=90
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,45 @@
+name: Roll back LifeOS application
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Full SHA of a previously successful, still-installed release
+        required: true
+        type: string
+      source_run:
+        description: Successful deployment run ID and attempt, e.g. 123456789-1
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  rollback:
+    if: github.ref == 'refs/heads/main' && vars.LIFE_OS_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    environment: production
+    concurrency:
+      group: life-os-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          project_id: ${{ secrets.GCP_PROJECT }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      - name: Roll back binaries without rolling back live data
+        env:
+          GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
+          GCP_ZONE: ${{ secrets.GCP_ZONE }}
+          GCP_INSTANCE: ${{ secrets.GCP_INSTANCE }}
+          GCP_RELEASE_BUCKET: ${{ secrets.GCP_RELEASE_BUCKET }}
+          ROLLBACK_SHA: ${{ inputs.sha }}
+          ROLLBACK_RUN: ${{ inputs.source_run }}
+        run: scripts/deploy-github.sh rollback

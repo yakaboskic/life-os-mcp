@@ -1,0 +1,34 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+
+# Never commit Google credentials or tokens, even if copied into the repo by mistake
+client_secret*.json
+*.tokens.json
+tokens/
+
+# Runtime state and workload identity artifacts
+.life-os/
+*.sqlite
+*.sqlite-*
+gha-creds-*.json
+release*.tar.gz
+*.key
+.env*
+graphify-out/
+
+# Private pre-existing local seed/runbook data; never publish with application code
+scripts/seed-track.ts
+scripts/tracker-register.mjs
+docs/team-tracking-sync.md
+__pycache__/
+*.pyc
+.vercel/
+release/
+
+.playwright-mcp/
+
+# Safe template only; real deployment values remain private.
+!.env.example

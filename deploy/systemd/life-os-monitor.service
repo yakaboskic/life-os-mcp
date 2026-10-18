@@ -1,0 +1,15 @@
+[Unit]
+Description=LifeOS operational metrics heartbeat
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+User=lifeos
+Group=lifeos
+EnvironmentFile=/etc/life-os/runtime.env
+ExecStart=/usr/bin/python3 /usr/local/lib/life-os/monitor.py
+TimeoutStartSec=60
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true

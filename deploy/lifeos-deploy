@@ -1,0 +1,244 @@
+#!/usr/bin/env bash
+# Root-owned narrow deployment entry point. Installed by bootstrap, never by CI.
+set -euo pipefail
+PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/bin:/snap/bin:/opt/node/bin
+export PATH
+[[ $EUID == 0 ]] || { echo 'Run through the installed sudo rule' >&2; exit 2; }
+# shellcheck source=/dev/null
+source /etc/life-os/deploy.env
+mode=${1:-}
+sha=${2:-}
+run=${3:-}
+checksum=${4:-}
+is_rollback=0
+[[ $sha =~ ^[0-9a-f]{40}$ && $run =~ ^[1-9][0-9]{0,17}-[1-9][0-9]{0,5}$ ]] || { echo 'Invalid release identity' >&2; exit 2; }
+unit="life-os-deploy-${run}"
+status_file="/var/lib/life-os-deploy/$run.json"
+mkdir -p /var/lib/life-os-deploy
+chmod 755 /var/lib/life-os-deploy
+write_status() {
+  local state=$1
+  python3 - "$status_file" "$sha" "$run" "$state" <<'PY'
+import json,os,sys,tempfile,time
+path,sha,run,state=sys.argv[1:]
+fd,tmp=tempfile.mkstemp(dir=os.path.dirname(path))
+with os.fdopen(fd,'w') as f: json.dump(dict(sha=sha,run=run,status=state,updatedAt=time.time()),f)
+os.chmod(tmp,0o644);os.replace(tmp,path)
+PY
+}
+case "$mode" in
+  status)
+    [[ -f $status_file ]] || { echo '{"status":"unknown"}'; exit 1; }
+    cat "$status_file"
+    exit 0;;
+  submit)
+    [[ $checksum =~ ^[0-9a-f]{64}$ ]] || { echo 'Invalid SHA-256' >&2; exit 2; }
+    # Re-submission cannot replace a terminal result or launch duplicate work.
+    if [[ -f $status_file ]]; then cat "$status_file"; exit 0; fi
+    write_status queued
+    systemd-run --unit="$unit" --property=Type=exec --property=TimeoutStartSec=60 --property=RuntimeMaxSec=3600 \
+      /usr/local/sbin/lifeos-deploy activate "$sha" "$run" "$checksum"
+    exit 0;;
+  rollback)
+    [[ $checksum =~ ^[1-9][0-9]{0,17}-[1-9][0-9]{0,5}$ ]] || exit 2
+    [[ -f /var/lib/life-os-deploy/success-$checksum.json ]] || { echo 'Rollback requires a previously successful release' >&2; exit 2; }
+    if [[ -f $status_file ]]; then cat "$status_file"; exit 0; fi
+    write_status queued
+    systemd-run --unit="$unit" --property=Type=exec --property=TimeoutStartSec=60 --property=RuntimeMaxSec=3600 \
+      /usr/local/sbin/lifeos-deploy rollback-activate "$sha" "$run" "$checksum"
+    exit 0;;
+  rollback-activate)
+    [[ $PPID == 1 ]] || { echo "Activation must be supervised by systemd" >&2; exit 2; }
+    [[ $checksum =~ ^[1-9][0-9]{0,17}-[1-9][0-9]{0,5}$ ]] || exit 2
+    [[ -f /var/lib/life-os-deploy/success-$checksum.json ]] || exit 2
+    is_rollback=1;;
+  activate)
+    [[ $PPID == 1 ]] || { echo "Activation must be supervised by systemd" >&2; exit 2; }
+    [[ $checksum =~ ^[0-9a-f]{64}$ ]] || exit 2;;
+  *) echo 'Allowed commands: submit/status (activation is supervised)' >&2; exit 2;;
+esac
+exec 9>/run/lock/life-os-deploy.lock
+flock -w 3300 9 || { write_status failed_lock; exit 1; }
+run_number=${run%-*}
+previous_run=$(cat /var/lib/life-os-deploy/latest-run 2>/dev/null || echo 0)
+# Run IDs are monotonically increasing within this repository; retries retain ID.
+if (( run_number < previous_run )); then write_status superseded; exit 0; fi
+write_status staging
+stage=$(mktemp -d /opt/life-os/releases/.stage-XXXXXX)
+previous=""
+if [[ -L /opt/life-os/current && -f /opt/life-os/current/release.json ]]; then
+  previous=$(readlink -f /opt/life-os/current)
+fi
+activated=0
+drained=0
+success=0
+api() {
+  local method=$1 path=$2
+  # Never place bearer credentials in argv or logs.
+  python3 - "$method" "$path" <<'PY'
+import json,urllib.request,sys
+with open('/etc/life-os/interactive.token') as f: token=f.read().strip()
+r=urllib.request.Request('http://127.0.0.1:4748'+sys.argv[2], data=b'{}' if sys.argv[1]=='POST' else None, method=sys.argv[1], headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
+with urllib.request.urlopen(r,timeout=15) as response: print(response.read().decode())
+PY
+}
+run_app() {
+  local release=$1; shift
+  # Environment files are root-managed KEY=value entries without shell expansion.
+  python3 - "$release" "$@" <<'PY'
+import json,os,pwd,subprocess,sys
+account=pwd.getpwnam('lifeos');env={'PATH':'/opt/node/bin:/usr/local/bin:/usr/bin:/bin:/snap/bin','HOME':'/var/lib/life-os','USER':'lifeos'}
+for line in open('/etc/life-os/runtime.env'):
+ line=line.strip()
+ if line and not line.startswith('#'):
+  k,v=line.split('=',1);env[k]=v
+env['LIFE_OS_RELEASE_SHA']=json.load(open(sys.argv[1]+'/release.json'))['sha']
+os.initgroups('lifeos',account.pw_gid);os.setgid(account.pw_gid);os.setuid(account.pw_uid)
+result=subprocess.run([sys.argv[1]+'/bin/life-os',*sys.argv[2:]],env=env)
+sys.exit(result.returncode)
+PY
+}
+cleanup() {
+  local code=$?
+  trap - EXIT
+  rm -rf "$stage"
+  if (( success == 0 )); then
+    rm -f /var/lib/life-os/.deployment-paused
+    # Only binaries roll back. Database/data snapshots are NEVER auto-restored.
+    if (( activated == 1 )) && [[ -n $previous && -f $previous/release.json ]]; then
+      local schema
+      schema=$(python3 -c 'import json;print(json.load(open("/opt/life-os/current/release.json"))["schemaVersion"])')
+      if python3 - "$previous/release.json" "$schema" <<'PY'
+import json,sys
+m=json.load(open(sys.argv[1]));s=int(sys.argv[2]);sys.exit(0 if m['minSchemaVersion']<=s<=m['maxSchemaVersion'] else 1)
+PY
+      then
+        ln -sfn "$previous" /opt/life-os/current.rollback
+        mv -Tf /opt/life-os/current.rollback /opt/life-os/current
+        python3 - "$previous/release.json" >/etc/life-os/release.env <<'PY'
+import json,sys
+print('LIFE_OS_RELEASE_SHA='+json.load(open(sys.argv[1]))['sha'])
+PY
+        systemctl restart life-os.service || true
+      fi
+    elif [[ -n $previous ]]; then
+      systemctl start life-os.service || true
+    else
+      systemctl stop life-os.service || true
+    fi
+    if (( drained == 1 )); then api POST /v1/admin/resume >/dev/null 2>&1 || true; fi
+    write_status failed
+  fi
+  exit "$code"
+}
+trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+if (( is_rollback == 1 )); then
+  release=$(python3 - "/var/lib/life-os-deploy/success-$checksum.json" <<'PYCODE'
+import json,sys
+m=json.load(open(sys.argv[1]));print(m.get('installedPath',''))
+PYCODE
+  )
+  [[ $release =~ ^/opt/life-os/releases/[0-9a-f]{40}-[0-9]+-[0-9]+$ ]] || exit 2
+  [[ -f $release/release.json ]] || { echo 'Requested rollback release is no longer installed' >&2; exit 1; }
+  python3 - "$release/release.json" "/var/lib/life-os-deploy/success-$checksum.json" "$sha" "$previous/release.json" <<'PYCODE'
+import json,sys
+candidate=json.load(open(sys.argv[1]));success=json.load(open(sys.argv[2]));current=json.load(open(sys.argv[4]))
+assert candidate['sha']==success['sha']==sys.argv[3]
+assert candidate['minSchemaVersion']<=current['schemaVersion']<=candidate['maxSchemaVersion']
+PYCODE
+else
+  # Artifact path is built solely from validated IDs and root-managed bucket name.
+  gcloud storage cp --quiet "gs://${LIFE_OS_RELEASE_BUCKET}/releases/${sha}/${run}.tar.gz" "$stage/package.tar.gz"
+  printf '%s  %s\n' "$checksum" "$stage/package.tar.gz" | sha256sum --check --status
+  mkdir "$stage/app"
+  python3 - "$stage/package.tar.gz" "$stage/app" <<'PYCODE'
+import tarfile,sys
+with tarfile.open(sys.argv[1]) as t:
+ if sum(x.size for x in t.getmembers())>2_000_000_000: raise SystemExit('Release is too large')
+ t.extractall(sys.argv[2],filter='data')
+PYCODE
+  python3 - "$stage/app/release.json" "$sha" "$LIFE_OS_NODE_VERSION" <<'PYCODE'
+import json,sys
+import os
+root=os.path.dirname(sys.argv[1])
+for path in ['bin/life-os','dist/index.js','package.json','release.json']:
+ resolved=os.path.realpath(os.path.join(root,path));assert os.path.commonpath([root,resolved])==root and os.path.isfile(resolved)
+m=json.load(open(sys.argv[1]));assert m['sha']==sys.argv[2];assert m['node']==sys.argv[3];assert m['platform']=='linux' and m['arch']=='x64';assert m['schemaVersion']==1 and m['minSchemaVersion']==1 and m['maxSchemaVersion']==1
+PYCODE
+  release="/opt/life-os/releases/${sha}-${run}"
+  [[ ! -e $release ]] || { echo 'Release path already exists' >&2; exit 1; }
+  chown -R root:root "$stage/app"
+  chmod -R go-w "$stage/app"
+  mv "$stage/app" "$release"
+fi
+# Once a verified newer request begins, a late older workflow can never replace it.
+printf '%s\n' "$run_number" >/var/lib/life-os-deploy/latest-run
+if systemctl is-active --quiet life-os.service; then
+  write_status draining
+  api POST /v1/admin/drain >/dev/null
+  drained=1
+  deadline=$((SECONDS+2760))
+  while :; do
+    ready=$(api GET /readyz)
+    if python3 -c 'import json,sys;x=json.load(sys.stdin);sys.exit(0 if x.get("draining") and x.get("activeJobs",-1)==0 and x.get("activeRequests",-1)==0 else 1)' <<<"$ready"; then break; fi
+    (( SECONDS < deadline )) || { echo 'Drain deadline exceeded' >&2; exit 1; }
+    sleep 5
+  done
+fi
+write_status backing_up
+if [[ -n $previous ]]; then
+  backup="/var/lib/life-os/deploy-backups/$run"
+  install -d -o lifeos -g lifeos -m 700 "$(dirname "$backup")"
+  run_app "$previous" backup create --output "$backup"
+  run_app "$previous" backup verify "$backup"
+fi
+touch /var/lib/life-os/.deployment-paused
+systemctl stop life-os.service
+write_status migrating
+run_app "$release" db migrate
+write_status activating
+ln -sfn "$release" /opt/life-os/current.next
+mv -Tf /opt/life-os/current.next /opt/life-os/current
+printf 'LIFE_OS_RELEASE_SHA=%s\n' "$sha" >/etc/life-os/release.env
+activated=1
+systemctl start life-os.service
+for ((attempt=0; attempt<30; attempt++)); do
+  ready=$(api GET /readyz 2>/dev/null || true)
+  if python3 -c 'import json,sys;x=json.load(sys.stdin);sys.exit(0 if x.get("ok") and x.get("release")==sys.argv[1] else 1)' "$sha" <<<"$ready" 2>/dev/null; then break; fi
+  sleep 2
+ done
+python3 -c 'import json,sys;x=json.load(sys.stdin);assert x.get("ok") and x.get("release")==sys.argv[1]' "$sha" <<<"$ready"
+curl --fail --silent --max-time 10 http://127.0.0.1:4747/ | head -c 1000000 | python3 -c 'import sys;assert "LifeOS" in sys.stdin.read()'
+# Exercise the read-only MCP protocol through the same authenticated route agents use.
+python3 - <<'PYCODE'
+import json,urllib.request
+with open('/etc/life-os/interactive.token') as f: token=f.read().strip()
+headers={'Authorization':'Bearer '+token,'Content-Type':'application/json','Accept':'application/json, text/event-stream'}
+def request(body):
+ req=urllib.request.Request('http://127.0.0.1:4748/mcp',data=json.dumps(body).encode(),headers=headers)
+ with urllib.request.urlopen(req,timeout=15) as r:
+  session=r.headers.get('mcp-session-id')
+  if session: headers['Mcp-Session-Id']=session
+  text=r.read().decode()
+  if not text.strip(): return None
+  if text.startswith('event:') or text.startswith('data:'):
+   text=next(line[5:].strip() for line in text.splitlines() if line.startswith('data:'))
+  result=json.loads(text)
+  if 'error' in result: raise RuntimeError('MCP smoke test failed')
+  return result
+request({'jsonrpc':'2.0','id':1,'method':'initialize','params':{'protocolVersion':'2025-03-26','capabilities':{},'clientInfo':{'name':'lifeos-release-check','version':'1'}}})
+request({'jsonrpc':'2.0','method':'notifications/initialized'})
+result=request({'jsonrpc':'2.0','id':2,'method':'tools/list'})
+assert result and isinstance(result.get('result',{}).get('tools'),list)
+PYCODE
+rm -f /var/lib/life-os/.deployment-paused
+api POST /v1/admin/resume >/dev/null
+python3 - "$release/release.json" "$release" "/var/lib/life-os-deploy/success-$run.json" <<'PYCODE'
+import json,sys
+m=json.load(open(sys.argv[1]));m['installedPath']=sys.argv[2]
+with open(sys.argv[3],'w') as f: json.dump(m,f)
+PYCODE
+write_status succeeded
+success=1

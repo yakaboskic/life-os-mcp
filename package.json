@@ -1,0 +1,41 @@
+{
+  "name": "life-os-mcp",
+  "version": "0.2.0",
+  "description": "Life OS MCP server \u2014 an extensible toolkit of MCP toolsets for managing your life. First toolset: multi-account Gmail triage and reply.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "bin": {
+    "life-os": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build"
+  },
+  "overrides": {
+    "google-auth-library": "$google-auth-library"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "google-auth-library": "^10.9.0",
+    "googleapis": "^173.0.0",
+    "mimetext": "^3.0.28",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsup": "^8.5.0",
+    "tsx": "^4.23.0",
+    "typescript": "^5.9.0",
+    "vitest": "^4.0.0"
+  }
+}
