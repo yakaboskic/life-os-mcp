@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { PORTAL_HTML } from "../src/web/page.js";
 import { PWA_ASSETS } from "../src/web/pwa.js";
+import { PUBLIC_PAGES, PUBLIC_PAGE_LINKS } from "./public-pages.js";
 import { FLOW_COOKIE, SESSION_COOKIE, clearFlowCookie, clearSessionCookie, cookies, flowCookie, loginUrl, newLoginFlow, readLoginFlow, readSession, readWebConfig, sessionCookie, validateIdentity, verifyGoogleIdToken, type Identity, type WebConfig } from "./auth.js";
 
 export interface WebDependencies { env?: NodeJS.ProcessEnv; fetch?: typeof fetch; now?: () => number; verifyIdToken?: (token: string, audience: string) => Promise<Identity> }
 const API_PATHS = new Set(["/api/data", "/api/triage", "/api/jobs"]);
-const PRIVATE_HTML = PORTAL_HTML.replace("</body>", '<form method="post" action="/auth/logout" style="position:fixed;right:20px;bottom:10px;z-index:100"><button type="submit" style="color:#8da9b5;background:#101c25;border:1px solid #3b6474;padding:6px 12px;cursor:pointer">Sign out</button></form></body>');
+const PRIVATE_HTML = PORTAL_HTML.replace("</body>", '<form method="post" action="/auth/logout" style="position:fixed;right:20px;bottom:10px;z-index:100"><a href="/privacy" style="color:#8da9b5;background:#101c25;padding:6px 12px;font-size:12px">Privacy</a><button type="submit" style="color:#8da9b5;background:#101c25;border:1px solid #3b6474;padding:6px 12px;cursor:pointer">Sign out</button></form></body>');
 const SCRIPT_HASHES = [...PRIVATE_HTML.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((match) => `'sha256-${createHash("sha256").update(match[1]!).digest("base64")}'`).join(" ");
 const CSP = `default-src 'none'; script-src ${SCRIPT_HASHES || "'none'"}; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`;
 function response(body: string | Buffer, status = 200, type = "text/html; charset=utf-8", extra: Record<string, string> = {}): Response {
@@ -15,7 +16,7 @@ function json(body: unknown, status: number): Response { return response(JSON.st
 function redirect(location: string): Response { return response("", 303, "text/plain", { location }); }
 function escape(text: string): string { return text.replace(/[&<>"']/g, (value) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[value]!); }
 function loginPage(message = "Your private operations console.", enabled = true): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="theme-color" content="#050a0f"><link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/icons/apple-touch-icon.png"><title>LifeOS · Access</title><style>:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#050a0f;color:#e2f4f4;font:16px/1.6 system-ui,sans-serif;padding:28px}main{width:min(100%,460px);border:1px solid #3b6474;border-top:3px solid #71e1ed;padding:32px;background:#101c25}.eyebrow{font-size:11px;letter-spacing:.2em;color:#e7b16b}h1{font-size:32px;letter-spacing:.05em;font-weight:500}p{color:#8da9b5}a{display:inline-block;background:#71e1ed;color:#050a0f;text-decoration:none;padding:12px 20px;margin-top:12px}a:focus-visible{outline:2px solid #e7b16b;outline-offset:5px}</style></head><body><main><span class="eyebrow">PERSONAL SYSTEMS · SECURE ACCESS</span><h1>LifeOS</h1><p>${escape(message)}</p>${enabled ? '<a href="/auth/login">Sign in with Google</a>' : '<p>Sign-in is not configured yet. The dashboard will stay private until setup is complete.</p>'}</main></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="theme-color" content="#050a0f"><link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/icons/apple-touch-icon.png"><title>LifeOS · Access</title><style>:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#050a0f;color:#e2f4f4;font:16px/1.6 system-ui,sans-serif;padding:28px}main{width:min(100%,460px);border:1px solid #3b6474;border-top:3px solid #71e1ed;padding:32px;background:#101c25}.eyebrow{font-size:11px;letter-spacing:.2em;color:#e7b16b}h1{font-size:32px;letter-spacing:.05em;font-weight:500}p{color:#8da9b5}a{display:inline-block;background:#71e1ed;color:#050a0f;text-decoration:none;padding:12px 20px;margin-top:12px}a:focus-visible{outline:2px solid #e7b16b;outline-offset:5px}.public-links{display:flex;gap:18px;flex-wrap:wrap;margin-top:24px;border-top:1px solid #3b6474;padding-top:14px}.public-links a{background:none;color:#8da9b5;padding:0;margin:0;font-size:13px;text-decoration:underline;text-underline-offset:3px}</style></head><body><main><span class="eyebrow">PERSONAL SYSTEMS · SECURE ACCESS</span><h1>LifeOS</h1><p>${escape(message)}</p>${enabled ? '<a href="/auth/login">Sign in with Google</a>' : '<p>Sign-in is not configured yet. The dashboard will stay private until setup is complete.</p>'}${PUBLIC_PAGE_LINKS}</main></body></html>`;
 }
 async function limitedJson(upstream: Response): Promise<unknown> {
   if (!upstream.headers.get("content-type")?.toLowerCase().includes("application/json")) throw new Error("INVALID_GATEWAY_RESPONSE");
@@ -34,6 +35,11 @@ export function createWebHandler(dependencies: WebDependencies = {}): (request: 
   const verifyIdToken = dependencies.verifyIdToken ?? verifyGoogleIdToken;
   return async (request: Request): Promise<Response> => {
     const url = new URL(request.url);
+    const publicPage = PUBLIC_PAGES.get(url.pathname);
+    if (publicPage !== undefined) {
+      if (request.method !== "GET" && request.method !== "HEAD") return response("Method not allowed", 405, "text/plain; charset=utf-8", { allow: "GET, HEAD" });
+      return response(request.method === "HEAD" ? "" : publicPage);
+    }
     const asset = PWA_ASSETS[url.pathname];
     // These assets contain no account data and can install before sign-in.
     if (asset && request.method === "GET" && !url.search) return response(asset.body, 200, asset.contentType, url.pathname === "/service-worker.js" ? { "service-worker-allowed": "/" } : {});

@@ -1,8 +1,8 @@
 # Private LifeOS web app
 
-Vercel hosts a small authentication gateway and the same dashboard/PWA assets used on the VM. Personal data stays on the VM. Each deployment permits one Google account, configured privately through `LIFE_OS_ALLOWED_EMAIL`. The repository contains no default owner. The Google web OAuth client requests `openid email profile`, never Gmail permissions.
+Vercel hosts a small authentication gateway and the same dashboard/PWA assets used on the VM. The VM owns live data; the web gateway handles dashboard responses in transit, and the Gmail worker sends classification inputs to TypeSafe/Jev. Each deployment permits one Google account, configured privately through `LIFE_OS_ALLOWED_EMAIL`. The repository contains no default owner. The Google web OAuth client requests `openid email profile`, never Gmail permissions.
 
-Create the Vercel project with Root Directory `web-app`, Node.js 24, and **Include source files outside of the Root Directory in the Build Step** enabled. Use the generated production `https://<project>.vercel.app` origin; no custom domain is required. Set these server environment variables:
+Create the Vercel project with Root Directory `web-app`, Node.js 24, and **Include source files outside of the Root Directory in the Build Step** enabled. Use a stable production HTTPS origin you control, such as the generated `https://<project>.vercel.app` address; Google branding requirements may require additional domain verification or a custom domain. Set these server environment variables:
 
 | Variable | Value |
 | --- | --- |
@@ -17,6 +17,16 @@ Create the Vercel project with Root Directory `web-app`, Node.js 24, and **Inclu
 To deploy your own copy, clone or fork the repository, provision your own VM and Cloud Run gateway, and connect your Vercel project to your repository. Create your own OAuth web client and independent random session and gateway secrets. Store deployment values in Vercel's server environment settings; store the matching gateway token in your gateway's secret configuration. Keep OAuth credentials, account addresses, cloud project identifiers, tokens and live LifeOS data out of committed configuration. Production and any separately enabled preview environment need their own configured origins and secrets.
 
 Register `https://<project>.vercel.app/auth/callback` as the Google OAuth redirect URI. Do not reuse the Gmail Desktop OAuth client. Preview deployments reject authenticated requests unless their exact origin is explicitly configured with its own registered callback; production sessions are host-only.
+
+The app provides public, static branding pages without requiring login or working credentials. Set the Google Auth Platform Branding links to your deployment's exact URLs:
+
+| Branding field | Example URL |
+| --- | --- |
+| Application home page | `https://<project>.vercel.app/about` |
+| Privacy policy | `https://<project>.vercel.app/privacy` |
+| Terms of service | `https://<project>.vercel.app/terms` |
+
+These pages contain no account data or deployment secrets and link from the sign-in page. Keep their disclosures accurate for your installation, especially classification providers, data use and retention. Supply your monitored support contact in the Google consent configuration. Google's [branding requirements](https://support.google.com/cloud/answer/15549049) also require the homepage on a verified domain you own; complete any domain verification or custom-domain setup Google requires before publishing. The pages do not bypass Google verification.
 
 `LIFE_OS_ALLOWED_EMAIL` is required and accepts one complete email address. Surrounding whitespace is trimmed and casing normalized to lowercase. Domains, wildcards, address lists and malformed addresses are rejected. The verified Google email must match that address exactly; sharing its domain does not grant access, and dots or plus aliases are not rewritten. An absent or invalid owner setting disables login and API access.
 

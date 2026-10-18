@@ -27,8 +27,8 @@ jobs:
       - name: Validate operational scripts
         run: |
           bash -n scripts/release-build.sh scripts/deploy-github.sh scripts/gcp-provision.sh scripts/gcp-web-gateway.sh scripts/mcp-remote.sh deploy/bootstrap-vm.sh deploy/lifeos-deploy deploy/backup-upload.sh
-          python3 -m py_compile scripts/gcp-iap-policy.py scripts/gcp-monitoring.py deploy/monitor.py deploy/upload-backup.py
-          python3 -m unittest deploy/test_monitor.py deploy/test_upload_backup.py
+          python3 -m py_compile scripts/gcp-iap-policy.py scripts/gcp-monitoring.py scripts/release-upload.py deploy/monitor.py deploy/upload-backup.py
+          python3 -m unittest scripts/test_release_upload.py deploy/test_monitor.py deploy/test_upload_backup.py
           scripts/release-check-units.sh
       - name: Package and smoke-test production release
         env:

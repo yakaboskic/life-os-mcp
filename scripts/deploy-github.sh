@@ -17,7 +17,7 @@ else
   (cd release && sha256sum --check life-os.tar.gz.sha256)
   checksum=$(awk '{print $1}' release/life-os.tar.gz.sha256)
   [[ $checksum =~ ^[0-9a-f]{64}$ ]] || exit 2
-  gcloud storage cp --quiet --if-generation-match=0 release/life-os.tar.gz "gs://$GCP_RELEASE_BUCKET/releases/$sha/$run.tar.gz"
+  python3 scripts/release-upload.py release/life-os.tar.gz "$GCP_RELEASE_BUCKET" "$sha" "$run"
   command="sudo /usr/local/sbin/lifeos-deploy submit $sha $run $checksum"
 fi
 ssh_vm() {

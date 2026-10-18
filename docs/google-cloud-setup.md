@@ -62,6 +62,8 @@ Two ways to handle it:
 
 Production refresh tokens are not guaranteed to last forever: revocation, six months of disuse, Gmail password changes, granted time limits, or organization policies can invalidate them. Google currently limits each account/client pair to 100 live refresh tokens; minting more invalidates the oldest. LifeOS stores refresh tokens privately and refreshes access tokens automatically during normal work. See Google's [token lifetime documentation](https://developers.google.com/identity/protocols/oauth2/) and [verification exemptions](https://support.google.com/cloud/answer/13464323?hl=en).
 
+If publishing is blocked by incomplete Branding, complete the app name, support email, and developer contact, plus real public homepage and policy links. A deployed LifeOS web app serves `/about`, `/privacy`, and `/terms` without exposing dashboard data. Use those URLs on your own deployment and complete Google's domain ownership checks if requested. See the current [Branding requirements](https://support.google.com/cloud/answer/15549049?hl=en). Publishing the OAuth app does not remove LifeOS's own exact-email sign-in restriction.
+
 For a public source repository, each person deploying LifeOS should create their own OAuth clients and cloud resources. Publishing the code does not share the maintainer's OAuth client, credentials, or data with other deployments. A shared hosted service for unrelated users has different verification requirements.
 
 ## Troubleshooting
