@@ -61,4 +61,32 @@ describe("public LifeOS information pages", () => {
     expect(privacy).toContain("Revoking access does not erase data already stored");
     expect(privacy).toContain("no universal retention period");
   });
+
+  it("redirects only public pages to configured branding without forwarding request data", async () => {
+    const handler = createWebHandler({ env: { LIFE_OS_BRANDING_URL: "https://www.example.com/life-os/" } });
+    for (const path of paths) {
+      for (const method of ["GET", "HEAD"]) {
+        const response = await handler(new Request(`${origin}${path}?next=https://untrusted.example`, { method, headers: { cookie: "private=secret" } }));
+        expect(response.status).toBe(308);
+        expect(response.headers.get("location")).toBe(`https://www.example.com/life-os${path === "/about" ? "" : path}`);
+        expect(response.headers.get("cache-control")).toContain("no-store");
+        expect(response.headers.get("set-cookie")).toBeNull();
+        expect(await response.text()).toBe("");
+      }
+      expect((await handler(new Request(`${origin}${path}`, { method: "POST" }))).status).toBe(405);
+    }
+    for (const path of ["/api/data", "/api/triage", "/api/jobs", "/auth/login"]) {
+      const response = await handler(new Request(`${origin}${path}`));
+      expect(response.status).toBe(503);
+      expect(response.headers.get("location")).toBeNull();
+    }
+  });
+
+  it.each(["not-a-url", "http://www.example.com/life-os", "//www.example.com/life-os", "https://owner:secret@example.com/life-os", "https://www.example.com/life-os?secret=value", "https://www.example.com/life-os#secret"])("rejects invalid branding configuration without reflecting it: %s", async (base) => {
+    const handler = createWebHandler({ env: { LIFE_OS_BRANDING_URL: base } });
+    const response = await handler(new Request(`${origin}/privacy`));
+    expect(response.status).toBe(503);
+    expect(response.headers.get("location")).toBeNull();
+    expect(await response.text()).toBe("Public information is temporarily unavailable.");
+  });
 });
