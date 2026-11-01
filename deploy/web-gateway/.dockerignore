@@ -2,3 +2,4 @@
 !Dockerfile
 !package.json
 !server.mjs
+!read-routes.mjs
