@@ -1,8 +1,26 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createGateway } from './server.mjs';
+import { readRoute } from './read-routes.mjs';
 const token = 'x'.repeat(48);
 const upstream = 'http://10.53.0.2:4749';
+test('only bounded review reads accept query parameters', () => {
+  assert.equal(readRoute('/api/reviews?search=hello%20world&category=ACTION%2FNOW&limit=50'), '/api/reviews?search=hello+world&category=ACTION%2FNOW&limit=50');
+  assert.equal(readRoute('/api/review?itemId=held-123'), '/api/review?itemId=held-123');
+  for (const path of ['/api/reviews?limit=51', '/api/reviews?limit=0', '/api/reviews?limit=2&limit=3', '/api/reviews?bucket=unknown', '/api/reviews?category=OTHER', '/api/reviews?search=' + 'x'.repeat(201), '/api/reviews?search=%0A', '/api/reviews?url=https://evil.test', '/api/review', '/api/review?itemId=a&account=other', '/api/review?itemId=a&itemId=b', '/api/review?itemId=' + 'x'.repeat(101), '/api/data?limit=50', '/api/actions?itemId=a', '//evil.test/api/reviews', '/api/../api/reviews', '/%61pi/reviews', '/api/reviews#anything']) assert.equal(readRoute(path), undefined, path);
+});
+test('forwards canonical review queries and conversation reads without action authority', async t => {
+  const calls = [];
+  const base = await fixture(t, async (url, options) => { calls.push({ url: String(url), options }); return Response.json({ items: [] }); });
+  const headers = { authorization: 'Bearer ' + token };
+  assert.equal((await fetch(base + '/api/reviews?bucket=needsDecision&search=from%3Aexample&limit=50', { headers })).status, 200);
+  assert.equal((await fetch(base + '/api/review?itemId=held-123', { headers })).status, 200);
+  assert.equal(calls[0].url, upstream + '/api/reviews?bucket=needsDecision&search=from%3Aexample&limit=50');
+  assert.equal(calls[0].options.method, 'GET');
+  assert.equal(calls[0].options.headers['x-life-os-actor'], undefined);
+  assert.equal((await fetch(base + '/api/reviews?limit=999', { headers })).status, 404);
+  assert.equal(calls.length, 2);
+});
 async function fixture(t, fetchImpl, secret = token) {
   const server = createGateway({ token: secret, upstream, fetchImpl });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));

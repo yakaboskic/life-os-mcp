@@ -21,8 +21,9 @@ import { TrackerActions, actionEnvelope, parseActionRequest, withRevision, Actio
 import { ToolInputError } from "../core/errors.js";
 import { ok } from "../core/result.js";
 import { createAutomationService } from "../automation/service.js";
-import type { AutomationService } from "../automation/types.js";
-import { ZodError } from "zod";
+import type { AutomationService, ReviewQueueQuery } from "../automation/types.js";
+import { z, ZodError } from "zod";
+import { CATEGORIES } from "../jobs/types.js";
 
 function reply(res:ServerResponse,status:number,value:unknown) {
   res.writeHead(status,{"content-type":"application/json","cache-control":"no-store","x-content-type-options":"nosniff"}).end(JSON.stringify(value));
@@ -49,8 +50,8 @@ async function buildDaemon(config:LifeOsConfig,logger:Logger,options:DaemonOptio
   const dispatchAction=async(raw:unknown,actor:string)=>{
     const request=parseActionRequest(raw);
     try {
-      if(["automation.run","automation.schedule","review.resolve"].includes(request.action)) {
-        const result=await automation.command(request.action as "automation.run"|"automation.schedule"|"review.resolve",request.input,request.requestId,actor);
+      if(["automation.run","automation.schedule","review.resolve","review.bulkResolve","review.forgetPreference"].includes(request.action)) {
+        const result=await automation.command(request.action as Parameters<AutomationService["command"]>[0],request.input,request.requestId,actor);
         // Run on the next event-loop turn, after the command's receipt is durable.
         setImmediate(()=>{if(!draining) void automation.tick().catch(()=>logger.warn("Automation tick failed"));});
         return {ok:true,requestId:request.requestId,result};
@@ -60,9 +61,10 @@ async function buildDaemon(config:LifeOsConfig,logger:Logger,options:DaemonOptio
       if(error instanceof ToolInputError) throw new ActionError(error.message);
       if(error instanceof ZodError) throw new ActionError("Check the action fields and try again.");
       if(error instanceof Error) {
-        const conflicts=new Set(["AUTOMATION_BUSY","IDEMPOTENCY_CONFLICT","REVIEW_NOT_ELIGIBLE","REVIEW_STALE_CONTEXT","JOBS_BUSY"]);
+        const conflicts=new Set(["AUTOMATION_BUSY","IDEMPOTENCY_CONFLICT","REVIEW_NOT_ELIGIBLE","REVIEW_STALE_CONTEXT","REVIEW_HUMAN_PENDING","JOBS_BUSY","REVIEW_QUEUE_FULL","AUTOMATION_QUEUE_FULL"]);
         if(conflicts.has(error.message)) throw new ActionError(error.message,409,error.message);
-        if(["AUTOMATION_NOT_CONFIGURED","AUTOMATION_DRAINING"].includes(error.message)) throw new ActionError(error.message,503,error.message);
+        if(error.message==="PREFERENCE_NOT_FOUND") throw new ActionError(error.message,404,error.message);
+        if(["AUTOMATION_NOT_CONFIGURED","AUTOMATION_DRAINING","REVIEW_UNAVAILABLE"].includes(error.message)) throw new ActionError(error.message,503,error.message);
         if(["AUTOMATION_INVALID_REQUEST","AUTOMATION_INVALID_ACTION"].includes(error.message)) throw new ActionError(error.message,400,error.message);
       }
       throw error;
@@ -75,7 +77,15 @@ async function buildDaemon(config:LifeOsConfig,logger:Logger,options:DaemonOptio
         entries:store.listEntries({from:new Date(Date.now()-90*86400000)}).map(withRevision)});
     }},
     {name:"lifeos_automations",description:"Read automation schedules, runs, held Gmail reviews and the daily brief delivery state.",inputSchema:{},annotations:{readOnlyHint:true},handler:async()=>ok(automation.snapshot())},
-    {name:"lifeos_action",description:"Execute an allowed dashboard action or queue a named automation. Use a unique requestId and reuse the same payload/ID only after uncertain transport failure. Read lifeos_snapshot for expectedRevision and expectedTimerRevision. project.create accepts name (1–200 characters), optional exact productId, goal (up to 2000 characters), and notes (up to 20000 characters); project names must be unique without regard to case. automation.run accepts kind review, brief or daily. automation.schedule accepts enabled, localTime (HH:MM Eastern fallback), reviewEnabled and briefEnabled. review.resolve accepts itemId and category; only resolve as an explicit human decision.",
+    {name:"lifeos_review_queue",description:"Search and paginate configured held Gmail conversations. Read-only metadata, review rationale, durable human-decision results and saved sender preferences. Use the returned IDs and revisions for explicit human decisions.",inputSchema:{bucket:z.enum(["all","awaitingAgent","needsDecision","needsContext","queued"]).optional(),search:z.string().max(200).optional(),account:z.string().max(320).optional(),category:z.enum(CATEGORIES).optional(),limit:z.number().int().min(1).max(50).optional(),cursor:z.string().max(512).optional()},annotations:{readOnlyHint:true},handler:async(args)=>{
+      if(!automation.reviewQueue) throw new Error("Review workspace unavailable");
+      return ok(automation.reviewQueue(args));
+    }},
+    {name:"lifeos_review_detail",description:"Read the bounded plain-text Gmail conversation and classifier rationale for a held review item. Does not mark mail read or modify it. The returned changed flag prevents applying an outdated selection; truncated context remains non-actionable.",inputSchema:{itemId:z.string().min(1).max(100)},annotations:{readOnlyHint:true},handler:async(args)=>{
+      if(!automation.reviewDetail) throw new Error("Review workspace unavailable");
+      return ok(await automation.reviewDetail(args.itemId,AbortSignal.timeout(8_000)));
+    }},
+    {name:"lifeos_action",description:"Execute an allowed dashboard action or queue a named automation. Use a unique requestId and reuse the same payload/ID only after uncertain transport failure. Read lifeos_snapshot for expectedRevision and expectedTimerRevision. project.create accepts name (1–200 characters), optional exact productId, goal (up to 2000 characters), and notes (up to 20000 characters); project names must be unique without regard to case. automation.run accepts kind review, brief or daily. automation.schedule accepts enabled, localTime (HH:MM Eastern fallback), reviewEnabled and briefEnabled. review.resolve accepts itemId and category. review.bulkResolve accepts up to 50 items {itemId,revision,category} from lifeos_review_queue and optional rememberPreference (default false). Only submit explicit human decisions; do not impersonate human approval for agent-generated classifications. Set rememberPreference only when the user explicitly asks to save future sender guidance. review.forgetPreference accepts preferenceId and removes future guidance without undoing prior Gmail changes.",
       inputSchema:actionEnvelope.shape,annotations:{idempotentHint:true},handler:async(args)=>ok(await dispatchAction(args,"agent:interactive"))},
   ]};
   const toolsets=[...(options.toolsets??selectToolsets(config.toolsetFilter,[createGmailToolset({manager}),createTrackToolset(),createDriveToolset()])),runtimeTools];
@@ -180,7 +190,8 @@ async function buildDaemon(config:LifeOsConfig,logger:Logger,options:DaemonOptio
     }
   });
   server.requestTimeout=65_000;server.headersTimeout=15_000;
-  const web=createWebServer(config,()=>({status:jobs.status(),runs:jobs.history()}),{actions:false,automationSnapshot:()=>automation.snapshot()});
+  const web=createWebServer(config,()=>({status:jobs.status(),runs:jobs.history()}),{actions:false,automationSnapshot:()=>automation.snapshot(),
+    ...(automation.reviewQueue && automation.reviewDetail ? {reviewQueue:(query:unknown)=>automation.reviewQueue!(query as ReviewQueueQuery),reviewDetail:(id:string,signal:AbortSignal)=>automation.reviewDetail!(id,signal)} : {})});
   const interval=setInterval(()=>{if(!draining){void replay();void automation.tick().catch(()=>logger.warn("Automation tick failed"));}},30_000);
   interval.unref();
   void replay();

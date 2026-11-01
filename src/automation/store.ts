@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
+import type { ReviewItem } from "../jobs/types.js";
 import { transaction } from "../state/database.js";
-import type { AutomationKind, AutomationRun, AutomationSchedule, AutomationReviewDecision, BriefDelivery, BriefingArtifact } from "./types.js";
+import type { AutomationKind, AutomationRun, AutomationSchedule, AutomationReviewDecision, BriefDelivery, BriefingArtifact, ReviewCommandProgress, ReviewReceipt } from "./types.js";
 
 export interface ReviewRecord extends AutomationReviewDecision { revision: string; policyVersion: string }
-export interface StoredRun extends AutomationRun { approvedIds?: string[] }
+export interface StoredRun extends AutomationRun { approvedIds?: string[]; humanCommandId?: string }
+export interface HumanReviewCommand extends ReviewCommandProgress { actor: string; rememberPreference: boolean; receipt: ReviewReceipt; captured: Record<string, ReviewItem>; capturedPreferences: Record<string, { sender: string; version: number }> }
 export interface AutomationLimits { maxCalls: number; maxInputTokens: number; maxOutputTokens: number; maxReviewCalls: number }
 export const LIMITS: AutomationLimits = { maxCalls: 24, maxInputTokens: 500_000, maxOutputTokens: 40_000, maxReviewCalls: 20 };
 export function automationLimits(env: Record<string, string | undefined>): AutomationLimits {
@@ -37,6 +39,8 @@ export class AutomationStore {
       CREATE TABLE IF NOT EXISTS automation_outbox (id TEXT PRIMARY KEY, delivery_key TEXT UNIQUE NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, json TEXT NOT NULL, raw TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS automation_usage (day TEXT PRIMARY KEY, calls INTEGER NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS automation_review_usage (day TEXT PRIMARY KEY, calls INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS automation_human_review_commands (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, json TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS automation_human_review_intents (item_id TEXT PRIMARY KEY, command_id TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS owned_generated_messages (account TEXT NOT NULL, rfc_message_id TEXT NOT NULL, gmail_message_id TEXT, PRIMARY KEY(account,rfc_message_id));
     `);
     // Older releases did not distinguish failed/aborted review calls from brief calls.
@@ -57,6 +61,19 @@ export class AutomationStore {
       apply(); this.db.prepare("INSERT INTO automation_commands VALUES(?,?,?)").run(id, hash, now);
     });
   }
+  humanCommand(id: string): HumanReviewCommand | undefined { return decode(this.db.prepare("SELECT json FROM automation_human_review_commands WHERE id=?").get(id)); }
+  humanCommands(limit = 20): HumanReviewCommand[] { return this.db.prepare("SELECT json FROM automation_human_review_commands ORDER BY created_at DESC,rowid DESC LIMIT ?").all(limit).map(row => decode<HumanReviewCommand>(row)!); }
+  activeHumanCommands(): HumanReviewCommand[] { return this.db.prepare("SELECT json FROM automation_human_review_commands WHERE json_extract(json,'$.state') IN ('queued','running') ORDER BY created_at,rowid").all().map(row => decode<HumanReviewCommand>(row)!); }
+  humanIntent(id: string): string | undefined { return this.db.prepare("SELECT command_id FROM automation_human_review_intents WHERE item_id=?").get(id)?.command_id as string | undefined; }
+  saveHumanCommand(command: HumanReviewCommand): void {
+    transaction(this.db, () => {
+      this.db.prepare("INSERT INTO automation_human_review_commands VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET json=excluded.json").run(command.requestId, command.createdAt, JSON.stringify(command));
+      for (const item of command.items) {
+        if (["queued", "accepted"].includes(item.status)) this.db.prepare("INSERT INTO automation_human_review_intents VALUES(?,?) ON CONFLICT(item_id) DO NOTHING").run(item.itemId,command.requestId);
+        else this.db.prepare("DELETE FROM automation_human_review_intents WHERE item_id=? AND command_id=?").run(item.itemId,command.requestId);
+      }
+    });
+  }
   enqueue(key: string, kind: AutomationKind, day: string, now: string, actor: string, sourceRunId?: string, approvedIds?: string[]): StoredRun {
     const prior = decode<StoredRun>(this.db.prepare("SELECT json FROM automation_runs WHERE run_key=?").get(key)); if (prior) return prior;
     if (Number(this.db.prepare("SELECT count(*) AS n FROM automation_runs WHERE state IN ('queued','retry_wait')").get()!.n) >= 50) throw new Error("AUTOMATION_QUEUE_FULL");
@@ -68,7 +85,7 @@ export class AutomationStore {
   saveRun(run: StoredRun): void { this.db.prepare("UPDATE automation_runs SET state=?,json=? WHERE id=?").run(run.state, JSON.stringify(run), run.id); }
   claim(now: string): StoredRun | undefined {
     return transaction(this.db, () => {
-      const run = this.db.prepare("SELECT json FROM automation_runs WHERE state IN ('queued','retry_wait') ORDER BY created_at,rowid").all().map(row => decode<StoredRun>(row)!).find(item => !item.nextAttemptAt || item.nextAttemptAt <= now);
+      const run = this.db.prepare("SELECT json FROM automation_runs WHERE state IN ('queued','retry_wait') ORDER BY CASE WHEN json_extract(json,'$.humanCommandId') IS NOT NULL THEN 0 ELSE 1 END,created_at,rowid").all().map(row => decode<StoredRun>(row)!).find(item => !item.nextAttemptAt || item.nextAttemptAt <= now);
       if (!run) return;
       run.state = "running"; run.claim = randomUUID(); run.startedAt ??= now; run.attempts++; delete run.nextAttemptAt; this.saveRun(run); return run;
     });

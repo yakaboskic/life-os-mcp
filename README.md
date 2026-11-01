@@ -8,6 +8,8 @@ The Starfleet dashboard is an installable PWA. Its [Vercel web gateway](web-app/
 
 The authenticated dashboard can create projects; search projects when creating or editing tasks; start, switch and stop focus sessions; complete tasks; and log or correct time. Browser and MCP actions share the same transactional tracker. Version checks prevent stale edits, and durable request receipts make retries safe. See the [project and task POST examples](web-app/README.md#creating-projects-and-tasks). The standalone `life-os web` command remains read-only.
 
+The [email review workspace](web-app/README.md#reviewing-held-email) searches the full held queue, filters by account, review status or category, and previews conversations as plain text. Choose one category for up to 50 selected conversations at a time, with durable per-conversation results. Sender preferences are saved only when **Remember this preference** is explicitly checked, and can be removed later.
+
 Optional VM automations review held Gmail classifications and produce a daily brief in the dashboard and the operator's configured inbox. Initial classification stays with Jev; Claude reviews only eligible uncertain classifications. Configure a native Claude Code login in the dedicated runner account, or choose the separately billed Claude API provider. Named jobs have durable state, bounded usage, recovery and delivery reconciliation; the agent never receives Gmail credentials or arbitrary send authority.
 
 ```sh

@@ -399,6 +399,61 @@ export const PORTAL_HTML = `<!doctype html>
   .form-check input { width: 20px; height: 20px; accent-color: var(--accent); }
   @media (max-width: 600px) { .review-row { display: block; padding: 16px; } .review-row button { margin-top: 12px; } .automation-history-row { grid-template-columns: 1fr auto; } .automation-history-row > span:last-child { grid-column: 1 / -1; text-align: left; } }
 
+  #review-workspace { margin-top: 28px; }
+  .review-filters { display: grid; grid-template-columns: minmax(220px, 1.6fr) repeat(3, minmax(130px, 1fr)); gap: 12px; padding: 18px; margin: 18px 0 0; border: 1px solid var(--rule); background: var(--surface-deep); }
+  .review-filters .form-field { margin: 0; }
+  .review-filter-actions { grid-column: 1 / -1; display: flex; gap: 10px; align-items: center; }
+  .review-filter-actions p { margin-left: auto; color: var(--muted); font-size: 12px; }
+  .review-selection-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 12px 18px; background: var(--accent-soft); border: 1px solid var(--rule); border-top: 0; }
+  .review-selection-bar .form-check { margin: 0; font-size: 13px; }
+  .review-selection-bar > span { color: var(--ink-2); font-size: 13px; }
+  .review-selection-bar .action-button { margin-left: auto; }
+  .review-selection-bar button, .review-pager button, .review-filter-actions button { min-height: 44px; }
+  .review-queue-status { padding: 12px 0; color: var(--muted); font-size: 13px; }
+  .review-queue-status.is-error { color: var(--amber); }
+  .review-results { border: 1px solid var(--rule); background: var(--surface); }
+  .review-conversation { display: grid; grid-template-columns: 44px minmax(0, 1fr) minmax(145px, .28fr) auto; align-items: center; gap: 10px 16px; padding: 14px 18px 14px 8px; border-bottom: 1px solid var(--line); }
+  .review-conversation:last-child { border-bottom: 0; }
+  .review-conversation:has(input:checked) { background: var(--accent-soft); box-shadow: inset 3px 0 var(--accent); }
+  .review-check { display: flex; width: 44px; min-height: 44px; align-items: center; justify-content: center; }
+  .review-check input { width: 20px; height: 20px; accent-color: var(--accent); }
+  .review-conversation h3 { font-size: 14px; font-weight: 550; overflow-wrap: anywhere; }
+  .review-conversation p { color: var(--muted); font-size: 12px; margin-top: 4px; overflow-wrap: anywhere; }
+  .review-conversation .review-suggestion { color: var(--ink-2); }
+  .review-conversation button { min-height: 44px; }
+  .review-conversation > div { min-width: 0; }
+  .review-empty { padding: 28px 20px; color: var(--muted); }
+  .review-pager { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding-top: 14px; font-size: 13px; color: var(--muted); }
+  .review-pager > div { display: flex; gap: 8px; }
+  .review-progress { padding: 16px 18px; margin: 16px 0; border-left: 3px solid var(--accent); background: var(--surface-deep); font-size: 13px; }
+  .review-progress summary, .review-preferences > summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; color: var(--ink-2); }
+  .review-progress p, .review-progress li { color: var(--muted); margin: 5px 0; overflow-wrap: anywhere; }
+  .review-progress ul { padding-left: 20px; }
+  .review-preferences { margin-top: 20px; padding: 10px 18px; border: 1px solid var(--line); background: var(--surface-deep); font-size: 13px; }
+  .review-preference { display: flex; gap: 12px; align-items: center; justify-content: space-between; padding: 12px 0; border-top: 1px solid var(--line); }
+  .review-preference > div { min-width: 0; overflow-wrap: anywhere; }
+  .review-preference p { color: var(--muted); font-size: 12px; }
+  .review-preference button { min-height: 44px; }
+  .review-confirm-list { max-height: 170px; overflow-y: auto; margin: 12px 0 20px; padding-left: 22px; font-size: 13px; color: var(--ink-2); }
+  .review-confirm-list li { margin: 6px 0; overflow-wrap: anywhere; }
+  .review-effect { color: var(--ink-2); border-left: 3px solid var(--amber); background: var(--surface-deep); padding: 12px; margin-bottom: 16px; font-size: 13px; }
+  #detail-dialog.review-detail-dialog { width: min(900px, calc(100vw - 24px)); max-height: 90dvh; }
+  .review-detail-dialog .dialog-shell { max-height: 90dvh; }
+  .review-detail-dialog .dialog-close { min-width: 44px; min-height: 44px; }
+  .review-message { margin: 18px 0 0; padding: 18px 0 0; border-top: 1px solid var(--line); }
+  .review-message h3 { font-size: 14px; overflow-wrap: anywhere; }
+  .review-message .review-message-meta { margin: 6px 0 14px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+  .review-message-body { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.65; color: var(--ink-2); max-width: 78ch; }
+  @media (max-width: 900px) { .review-filters { grid-template-columns: 1fr 1fr; } .review-conversation { grid-template-columns: 44px minmax(0, 1fr) auto; } .review-conversation-status { grid-column: 2; } .review-conversation > button { grid-column: 3; grid-row: 1 / 3; } }
+  @media (max-width: 600px) {
+    .review-filters { padding: 14px; gap: 12px; } .review-filters > .form-field:first-child { grid-column: 1 / -1; }
+    .review-filter-actions { flex-wrap: wrap; } .review-filter-actions p { width: 100%; margin: 0; }
+    .review-selection-bar { padding: 10px 14px; gap: 6px 12px; } .review-selection-bar .action-button { margin-left: 0; }
+    .review-conversation { gap: 4px 8px; padding: 12px 12px 12px 4px; grid-template-columns: 44px minmax(0, 1fr); }
+    .review-conversation > button { grid-column: 2; grid-row: auto; justify-self: start; margin-top: 6px; }
+    .review-check { align-self: start; } .review-preference { align-items: start; flex-wrap: wrap; }
+  }
+
 </style>
 </head>
 <body>
@@ -488,6 +543,23 @@ export const PORTAL_HTML = `<!doctype html>
       <p class="section-intro">Scheduled triage, account health, and decisions awaiting review.</p>
       <div id="job-operations" class="operations-panel panel"><p class="mutetext">Loading job status…</p></div>
       <section id="review-queue" hidden></section>
+      <section id="review-workspace" aria-labelledby="review-heading" hidden>
+        <div class="portfolio-heading"><div><h2 id="review-heading">Review inbox</h2><p class="mutetext">Inspect held conversations and choose what happens next.</p></div><span class="chip" id="review-total"></span></div>
+        <p id="review-backlog" class="automation-detail"></p>
+        <form id="review-search-form" class="review-filters">
+          <div class="form-field"><label for="review-search">Search sender or conversation</label><input id="review-search" name="search" type="search" maxlength="200" placeholder="Name, address, subject or words" autocomplete="off"></div>
+          <div class="form-field"><label for="review-bucket">Review status</label><select id="review-bucket" name="bucket"><option value="all">All held conversations</option><option value="awaitingAgent">Awaiting Claude</option><option value="needsDecision">Needs your decision</option><option value="needsContext">Needs more context</option><option value="queued">Queued for changes</option></select></div>
+          <div class="form-field"><label for="review-account">Gmail account</label><select id="review-account" name="account"><option value="">All accounts</option></select></div>
+          <div class="form-field"><label for="review-category">Suggested category</label><select id="review-category" name="category"><option value="">All categories</option></select></div>
+          <div class="review-filter-actions"><button class="quiet-button" type="submit">Search queue</button><button class="text-button" id="review-reset" type="button">Reset filters</button><p>Searches the full queue. Up to 50 conversations per page.</p></div>
+        </form>
+        <div id="review-command-progress" aria-live="polite"></div>
+        <div class="review-selection-bar"><label class="form-check"><input id="review-select-page" type="checkbox"><span>Select this page</span></label><span id="review-selection-count">0 selected</span><button id="review-bulk-button" class="action-button" type="button">Choose category</button><button id="review-clear" class="text-button" type="button">Clear selection</button></div>
+        <p id="review-queue-status" class="review-queue-status" role="status" aria-live="polite"></p>
+        <div id="review-results" class="review-results" aria-busy="false"></div>
+        <nav class="review-pager" aria-label="Review pages"><span id="review-page-label"></span><div><button id="review-previous" class="quiet-button" type="button">Previous</button><button id="review-next" class="quiet-button" type="button">Next</button></div></nav>
+        <details id="review-preferences" class="review-preferences" hidden><summary>Remembered sender preferences</summary><p class="mutetext">Guidance for future reviews. Every conversation still goes through the review rules.</p><div id="review-preference-list"></div></details>
+      </section>
       <h2>Run reports</h2>
       <div class="taskbar">
         <label><input type="radio" name="tfilter" value="today" checked> Today</label>
@@ -805,6 +877,7 @@ export const PORTAL_HTML = `<!doctype html>
     $("dialog-title").textContent = title;
     $("dialog-body").innerHTML = body;
     const dialog = $("detail-dialog");
+    dialog.classList.remove("review-detail-dialog");
     if (!dialog.open) dialog.showModal();
   }
 
@@ -1190,6 +1263,11 @@ export const PORTAL_HTML = `<!doctype html>
       DAEMON_RESTARTED: "LifeOS restarted during this run. Check the latest attempt for progress.",
       REVIEW_NOT_ELIGIBLE: "This review is no longer actionable. Refresh the queue to see its current state.",
       REVIEW_SERVICE_UNAVAILABLE: "Email review is temporarily unavailable. Check the connected Gmail account and try again.",
+      REVIEW_REVISION_CHANGED: "This conversation changed. Inspect its latest messages before choosing a category again.",
+      REVIEW_EVIDENCE_CHANGED: "The conversation changed before the action could run. Inspect it again.",
+      REVIEW_NOT_FOUND: "This conversation is no longer in the review queue.",
+      REVIEW_CONTEXT_INCOMPLETE: "More conversation context is needed before a category can be applied.",
+      INSUFFICIENT_OR_TRUNCATED_CONTEXT: "The available conversation text is incomplete. Open Gmail to inspect the full thread.",
     };
     if (Object.hasOwn(messages, code)) return messages[code];
     return /^[A-Z][A-Z0-9_]+$/.test(String(fallback)) ? "The workflow could not finish. Check its latest run and try again." : fallback;
@@ -1213,6 +1291,7 @@ export const PORTAL_HTML = `<!doctype html>
       $("action-fields").disabled = actionBusy || actionEditor.uncertain === true;
       $("action-dialog").setAttribute("aria-busy", String(actionBusy));
     }
+    refreshReviewControls();
   }
   function renderFocusControls() {
     const active = data?.activeTimer;
@@ -1231,10 +1310,10 @@ export const PORTAL_HTML = `<!doctype html>
   function taskOptions(selected, openOnly = false) {
     return data.tasks.filter((t) => !openOnly || t.status === "open").map((t) => '<option value="' + esc(t.id) + '"' + (t.id === selected ? ' selected' : '') + '>' + esc(t.title) + (t.status === "done" ? ' · completed' : '') + '</option>').join("");
   }
-  function openActionEditor({ title, description = "", fields = "", submit, action, input, immediate = false }) {
+  function openActionEditor({ title, description = "", fields = "", submit, action, input, onSuccess, immediate = false }) {
     if (!canAct()) return;
     if ($("detail-dialog").open) $("detail-dialog").close();
-    actionEditor = { action, input, request: null, uncertain: false, submit };
+    actionEditor = { action, input, onSuccess, request: null, uncertain: false, submit };
     $("action-title").textContent = title;
     $("action-description").textContent = description;
     $("action-fields").innerHTML = fields;
@@ -1466,14 +1545,15 @@ export const PORTAL_HTML = `<!doctype html>
       if (!res.ok) {
         if (res.status === 401) { authExpired = true; throw Object.assign(new Error("Your session expired. Sign in again, then retry this request."), { known: true }); }
         const reason = actionErrorMessage(receipt.code || receipt.error, String(receipt.error || "The change could not be saved."));
-        const changed = res.status === 409 && editor.action !== "project.create" && !editor.action.startsWith("automation.") && editor.action !== "review.resolve";
+        const changed = res.status === 409 && editor.action !== "project.create" && !editor.action.startsWith("automation.") && !editor.action.startsWith("review.");
         const message = changed ? reason + " Your draft is preserved. Close this form and reopen it to use the latest version." : reason;
         throw Object.assign(new Error(message), { known: res.status < 500 });
       }
       if (receipt.ok !== true || receipt.requestId !== editor.request.body.requestId) throw new Error("Invalid action receipt");
       editor.uncertain = false;
+      const successMessage = editor.onSuccess?.(receipt.result);
       $("action-dialog").close(); actionEditor = null;
-      actionFeedback(editor.action === "automation.run" ? "Queued. Follow progress in Today." : editor.action === "review.resolve" ? "Category saved. Gmail changes are queued; follow progress in Today." : "Saved. Your agents will see this change too.");
+      actionFeedback(successMessage || (editor.action === "automation.run" ? "Queued. Follow progress in Today." : editor.action === "review.resolve" ? "Category saved. Gmail changes are queued; follow progress in Today." : "Saved. Your agents will see this change too."));
       await refresh();
       if (data?.capabilities?.automation) await refreshAutomation();
       if (!dataAvailable) actionFeedback("Saved. Waiting for the latest dashboard data.");
@@ -1505,7 +1585,8 @@ export const PORTAL_HTML = `<!doctype html>
   function renderAutomation() {
     const supported = !!data?.capabilities?.automation;
     $("automation-panel").hidden = !supported;
-    $("review-queue").hidden = !supported;
+    $("review-queue").hidden = !supported || data?.capabilities?.reviewQueue === true;
+    $("review-workspace").hidden = data?.capabilities?.reviewQueue !== true;
     if (!supported) return;
     if (!automation) {
       $("automation-panel").innerHTML = '<h3>Daily workflow</h3><p class="mutetext">' + (automationAvailable ? 'Loading…' : 'Automation status is unavailable. Retrying automatically.') + '</p>';
@@ -1585,6 +1666,217 @@ export const PORTAL_HTML = `<!doctype html>
     });
   }
 
+  // ---- paged email review workspace ----
+  const REVIEW_BUCKET_LABELS = { awaitingAgent: 'Awaiting Claude', needsDecision: 'Needs your decision', needsContext: 'Needs more context', queued: 'Changes queued' };
+  const reviewWorkspace = { snapshot: null, accounts: [], available: false, loading: false, filters: { bucket: 'all', search: '', account: '', category: '' }, cursors: [null], page: 0, selected: new Map(), sequence: 0, controller: null, notice: '', error: '', latestCommand: null };
+  let reviewDetailSequence = 0, reviewDetailController = null, reviewDetailItem = null;
+  function reviewActionable(item) { return item?.reviewable === true && typeof item.revision === 'string' && !!item.revision && item.bucket !== 'queued'; }
+  function reviewCanWrite() { return data?.capabilities?.reviewQueue === true && canAct() && reviewWorkspace.available && automationAvailable && !automation?.paused; }
+  function reviewQueueQuery(filters, cursor) {
+    const query = new URLSearchParams({ bucket: filters.bucket || 'all', limit: '50' });
+    for (const key of ['search', 'account', 'category']) if (filters[key]) query.set(key, filters[key]);
+    if (cursor) query.set('cursor', cursor);
+    return query.toString();
+  }
+  function stableReviewSelection(selected, items) {
+    const current = new Map(items.map((item) => [item.id, item]));
+    return new Map([...selected].filter(([id, item]) => reviewActionable(current.get(id)) && current.get(id).revision === item.revision).map(([id]) => [id, current.get(id)]));
+  }
+  function bulkReviewInput(items, category, rememberPreference) {
+    if (!items.length || items.length > 50 || new Set(items.map((item) => item.id)).size !== items.length) throw new Error('Choose between 1 and 50 different conversations.');
+    if (!REVIEW_CATEGORIES.includes(category)) throw new Error('Choose the category to apply.');
+    if (items.some((item) => !reviewActionable(item))) throw new Error('Some conversations are no longer actionable. Refresh the queue and inspect them again.');
+    return { items: items.map((item) => ({ itemId: item.id, revision: item.revision, category })), rememberPreference: rememberPreference === true };
+  }
+  function reviewCategoryEffect(category, total) {
+    if (!REVIEW_CATEGORIES.includes(category)) return 'Choose a category to see the changes for ' + total + (total === 1 ? ' conversation.' : ' conversations.');
+    const effects = ['Apply ' + category + ', remove other LifeOS category labels, and archive the reviewed messages.'];
+    if (['ACTION/NOW', 'ACTION/SOON', 'WAITING', 'LEGAL/COMPLIANCE'].includes(category)) effects.push('Star these messages.');
+    if (['ACTION/NOW', 'ACTION/SOON'].includes(category)) effects.push('Create or update a LifeOS follow-up task.');
+    if (category === 'SPAM/SUSPECT') effects.push('This applies a label; it does not report spam.');
+    return effects.join(' ');
+  }
+  function reviewSource(item) { return 'https://mail.google.com/mail/u/?authuser=' + encodeURIComponent(item.account) + '#all/' + encodeURIComponent(item.threadId); }
+  function reviewOutcomeText(code) {
+    const known = { LOW_CONFIDENCE: 'The classifier was uncertain.', REVIEW_STALE: 'Conversation changed; inspect it again.', REVIEW_EVIDENCE_CHANGED: 'Conversation changed; inspect it again.', REVIEW_REVISION_MISMATCH: 'Conversation changed; inspect it again.', REVIEW_CONTEXT_CHANGED: 'Conversation changed; inspect it again.', REVIEW_NOT_ELIGIBLE: 'No longer actionable.', REVIEW_NOT_FOUND: 'No longer in the queue.', REVIEW_CONTEXT_INCOMPLETE: 'More context is needed.', REVIEW_INCOMPLETE_CONTEXT: 'More context is needed.', INSUFFICIENT_OR_TRUNCATED_CONTEXT: 'More context is needed.', REVIEW_ALREADY_QUEUED: 'This conversation already has queued changes.', UNCERTAIN_GMAIL_MUTATION: 'Gmail changes need reconciliation before another action.', HUMAN_REVIEW_APPLY_FAILED: 'The Gmail change could not finish. Inspect its current state.', REVIEW_PREFERENCE_CHANGED: 'A sender preference changed. Review the conversation again.' };
+    return known[code] || (code ? actionErrorMessage(code, 'This item needs another look. Inspect its latest conversation.') : '');
+  }
+  function renderReviewCommands(commands) {
+    const rows = Array.isArray(commands) ? commands.slice(0, 5) : [];
+    const local = reviewWorkspace.latestCommand;
+    if (local && !rows.some((item) => item.requestId === local.requestId)) rows.unshift(local);
+    $('review-command-progress').innerHTML = rows.map((command) => {
+      const items = Array.isArray(command.items) ? command.items : [];
+      const totals = {};
+      for (const item of items) totals[item.status] = (totals[item.status] || 0) + 1;
+      const summary = ['queued', 'accepted', 'applied', 'stale', 'held', 'failed', 'rejected'].filter((status) => totals[status]).map((status) => totals[status] + ' ' + (status === 'accepted' ? 'validated' : status)).join(' · ');
+      const issues = items.filter((item) => ['stale', 'held', 'failed', 'rejected'].includes(item.status));
+      return '<div class="review-progress"><strong>Category changes · ' + esc(jobStatus(command.state || 'queued')) + '</strong><p>' + esc(summary || 'Waiting for the queue') + '</p>' +
+        (issues.length ? '<details><summary>' + issues.length + ' need attention</summary><ul>' + issues.map((item) => '<li>' + esc(jobStatus(item.status)) + (item.code ? ': ' + esc(reviewOutcomeText(item.code)) : '') + ' <button class="text-button" type="button" data-review-inspect="' + esc(item.itemId) + '">Inspect conversation</button></li>').join('') + '</ul><p>Changed or rejected conversations were not approved by this selection. Inspect the latest context before retrying.</p></details>' : '') +
+        (items.some((item) => item.preferenceSaved) ? '<p>Confirmed sender preferences were saved for future review guidance.</p>' : '') + '</div>';
+    }).join('');
+  }
+  function refreshReviewControls() {
+    if (!data?.capabilities?.reviewQueue) return;
+    const state = reviewWorkspace, actionable = (state.snapshot?.items || []).filter(reviewActionable);
+    const check = $('review-select-page'), selected = state.selected.size;
+    check.disabled = !reviewCanWrite() || !actionable.length;
+    check.checked = actionable.length > 0 && actionable.every((item) => state.selected.has(item.id));
+    check.indeterminate = selected > 0 && !check.checked;
+    $('review-selection-count').textContent = selected + ' selected on this page';
+    $('review-bulk-button').disabled = !reviewCanWrite() || !selected;
+    $('review-clear').disabled = !selected || actionBusy;
+    $('review-previous').disabled = state.loading || !state.page;
+    $('review-next').disabled = state.loading || !state.available || !state.snapshot?.nextCursor;
+    document.querySelectorAll('[data-review-select]').forEach((node) => { const item = state.snapshot?.items.find((row) => row.id === node.dataset.reviewSelect); node.disabled = !reviewCanWrite() || !reviewActionable(item); node.checked = state.selected.has(node.dataset.reviewSelect); });
+    document.querySelectorAll('[data-review-forget], [data-review-detail-apply]').forEach((node) => { node.disabled = !reviewCanWrite() || (node.hasAttribute('data-review-detail-apply') && !reviewActionable(reviewDetailItem)); });
+    if (actionEditor?.action === 'review.bulkResolve' || actionEditor?.action === 'review.forgetPreference') $('action-submit').disabled = !reviewCanWrite();
+  }
+  function renderReviewWorkspace() {
+    const state = reviewWorkspace, snapshot = state.snapshot;
+    $('review-workspace').hidden = data?.capabilities?.reviewQueue !== true;
+    if ($('review-workspace').hidden) return;
+    const counts = snapshot?.counts || snapshot?.backlog;
+    $('review-total').textContent = counts ? count(counts.total) + ' held' : 'Review queue';
+    $('review-backlog').textContent = counts ? count(counts.awaitingAgent) + ' awaiting Claude · ' + count(counts.needsDecision) + ' need your decision · ' + count(counts.needsContext) + ' need more context · ' + count(counts.queued) + ' queued' : 'Conversations stay held until a category is explicitly chosen or a review completes.';
+    const account = $('review-account'), accounts = state.accounts;
+    const accountSignature = JSON.stringify(accounts);
+    if (account.dataset.options !== accountSignature) { const selected = account.value; account.innerHTML = '<option value="">All accounts</option>' + accounts.map((value) => '<option value="' + esc(value) + '">' + esc(value) + '</option>').join(''); account.value = selected; account.dataset.options = accountSignature; }
+    if (!$('review-category').dataset.ready) { $('review-category').innerHTML = '<option value="">All categories</option>' + REVIEW_CATEGORIES.map((category) => '<option value="' + esc(category) + '">' + esc(category) + '</option>').join(''); $('review-category').dataset.ready = 'true'; }
+    const items = snapshot?.items || [], results = $('review-results');
+    const focused = document.activeElement, focusedId = focused?.dataset?.reviewSelect || focused?.dataset?.reviewInspect;
+    const focusedType = focused?.hasAttribute?.('data-review-select') ? 'data-review-select' : 'data-review-inspect';
+    results.setAttribute('aria-busy', String(state.loading));
+    results.innerHTML = items.length ? items.map((item) => {
+      const suggested = item.agentReview?.category || item.category;
+      return '<article class="review-conversation"><label class="review-check"><input type="checkbox" data-review-select="' + esc(item.id) + '" aria-label="Select ' + esc(item.subject || 'conversation without subject') + '"' + (state.selected.has(item.id) ? ' checked' : '') + (!reviewActionable(item) ? ' disabled' : '') + '></label><div><h3>' + esc(item.subject || '(No subject)') + '</h3><p>' + esc(item.sender) + '</p><p>' + esc(item.account) + ' · ' + jobTime(item.createdAt) + '</p>' + (suggested ? '<p class="review-suggestion">Suggested: ' + esc(suggested) + '</p>' : '') + '</div><div class="review-conversation-status">' + jobBadge(REVIEW_BUCKET_LABELS[item.bucket] || 'Held for review') + '<p>' + esc(reviewOutcomeText(item.reason)) + '</p></div><button class="quiet-button" type="button" data-review-inspect="' + esc(item.id) + '">Inspect conversation</button></article>';
+    }).join('') : '<p class="review-empty">' + (state.loading && !snapshot ? 'Loading conversations…' : snapshot ? 'No conversations match these filters. Try another search or reset the filters.' : 'The review queue is unavailable. Retry after the connection is ready.') + '</p>';
+    if (focusedId && results.contains(focused) === false && focused?.isConnected === false) [...results.querySelectorAll('[' + focusedType + ']')].find((node) => node.getAttribute(focusedType) === focusedId)?.focus({ preventScroll: true });
+    const status = $('review-queue-status');
+    status.textContent = state.error || state.notice || (state.loading ? 'Refreshing the queue…' : snapshot ? snapshot.total + ' matching conversations. Selections apply only to this page.' : '');
+    status.classList.toggle('is-error', !!state.error);
+    $('review-page-label').textContent = 'Page ' + (state.page + 1) + (snapshot ? ' · ' + items.length + ' shown of ' + snapshot.total : '');
+    renderReviewCommands(snapshot?.pendingCommands);
+    const preferences = snapshot?.preferences || [];
+    $('review-preferences').hidden = !preferences.length;
+    $('review-preference-list').innerHTML = preferences.map((item) => '<div class="review-preference"><div><strong>' + esc(item.sender) + '</strong><p>' + esc(item.account) + ' · ' + esc(item.category) + '</p></div><button class="quiet-button" type="button" data-review-forget="' + esc(item.id) + '">Forget preference</button></div>').join('');
+    refreshReviewControls();
+  }
+  async function refreshReviewQueue() {
+    if (data?.capabilities?.reviewQueue !== true || currentTab() !== 'triage' || document.hidden) return;
+    const state = reviewWorkspace, sequence = ++state.sequence;
+    state.controller?.abort(); state.controller = new AbortController(); state.loading = true;
+    renderReviewWorkspace();
+    try {
+      const res = await fetch('/api/reviews?' + reviewQueueQuery(state.filters, state.cursors[state.page]), { cache: 'no-store', signal: AbortSignal.any([state.controller.signal, AbortSignal.timeout(20000)]) });
+      if (sequence !== state.sequence) return;
+      if (res.status === 401) authExpired = true;
+      if (!res.ok) throw new Error(res.status === 401 ? 'Sign in again to load your review queue.' : 'The queue could not refresh. Your selections cannot be applied until it reconnects.');
+      const snapshot = await res.json();
+      if (!Array.isArray(snapshot.items) || snapshot.items.length > 50 || !Number.isSafeInteger(snapshot.total) || snapshot.total < 0) throw new Error('The queue response could not be read. Try refreshing again.');
+      if (sequence !== state.sequence) return;
+      const selected = stableReviewSelection(state.selected, snapshot.items), removed = state.selected.size - selected.size;
+      state.selected = selected; state.snapshot = snapshot; state.accounts = snapshot.accounts || state.accounts; state.available = true; state.error = '';
+      if (removed) state.notice = removed + (removed === 1 ? ' selection was' : ' selections were') + ' cleared because the conversation changed or left this page. Inspect it again before applying a category.';
+      if (state.latestCommand && snapshot.pendingCommands?.some((item) => item.requestId === state.latestCommand.requestId)) state.latestCommand = null;
+    } catch (error) {
+      if (sequence !== state.sequence) return;
+      state.available = false; state.error = error.message || 'The queue is unavailable. Retry after reconnecting.';
+    } finally { if (sequence === state.sequence) { state.loading = false; renderReviewWorkspace(); refreshActionControls(); } }
+  }
+  function changeReviewPage(direction) {
+    const state = reviewWorkspace;
+    if (state.loading || (direction > 0 && !state.snapshot?.nextCursor) || (direction < 0 && state.page === 0)) return;
+    if (direction > 0) { state.cursors = state.cursors.slice(0, state.page + 1); state.cursors.push(state.snapshot.nextCursor); }
+    state.page += direction;
+    state.notice = state.selected.size ? 'Selection cleared. Choose conversations on this page.' : '';
+    state.selected.clear(); state.available = false; state.snapshot = null;
+    void refreshReviewQueue();
+  }
+  function searchReviewQueue(reset = false) {
+    const state = reviewWorkspace;
+    if (reset) $('review-search-form').reset();
+    const form = new FormData($('review-search-form'));
+    state.filters = { bucket: String(form.get('bucket') || 'all'), search: String(form.get('search') || '').trim(), account: String(form.get('account') || ''), category: String(form.get('category') || '') };
+    state.cursors = [null]; state.page = 0;
+    state.notice = state.selected.size ? 'Selection cleared for the new search.' : '';
+    state.selected.clear(); state.available = false; state.snapshot = null;
+    void refreshReviewQueue();
+  }
+  function selectReviewItem(id, checked) {
+    if (!reviewCanWrite()) return;
+    const state = reviewWorkspace, item = state.snapshot?.items.find((row) => row.id === id);
+    if (!checked) state.selected.delete(id);
+    else if (reviewActionable(item) && state.selected.size < 50) state.selected.set(id, item);
+    state.notice = ''; refreshReviewControls();
+  }
+  function reviewConversationHtml(detail) {
+    const item = detail.item;
+    return '<div class="review-context"><p>' + esc(item.sender) + '</p><p>' + esc(item.account) + '</p><p>' + esc(REVIEW_BUCKET_LABELS[item.bucket] || jobStatus(item.reason)) + '</p><a href="' + esc(reviewSource(item)) + '" target="_blank" rel="noopener noreferrer">Open conversation in Gmail</a></div>' +
+      reviewRationale(item.agentReview) +
+      (detail.changed ? '<p class="review-effect">The conversation changed since this queue entry was captured. Refresh and review the latest context before applying a category.</p>' : '') +
+      (detail.blockedReason ? '<p class="review-effect">' + esc(reviewOutcomeText(detail.blockedReason)) + '</p>' : '') +
+      (reviewActionable(item) && !detail.changed && !detail.blockedReason ? '<button class="action-button" type="button" data-review-detail-apply>Choose category for this conversation</button>' : '<p class="mutetext">This conversation cannot be classified from its current context. You can inspect the full conversation in Gmail.</p>') +
+      (detail.truncated || (detail.messages || []).some((message) => message.truncated) ? '<p class="automation-detail">Only the available text is shown. Open Gmail for the full conversation and attachments.</p>' : '') +
+      (detail.messages || []).map((message) => '<article class="review-message"><h3>' + esc(message.subject || '(No subject)') + '</h3><div class="review-message-meta">From ' + esc(message.from) + '<br>To ' + esc(message.to) + '<br>' + jobTime(message.internalDate) + (message.attachments ? ' · Has attachments; contents are not shown' : '') + '</div><div class="review-message-body">' + esc(message.body || '(No message text available)') + '</div></article>').join('');
+  }
+  async function openReviewConversation(id) {
+    if (!dataAvailable || authExpired) return;
+    const sequence = ++reviewDetailSequence;
+    reviewDetailController?.abort(); reviewDetailController = new AbortController(); reviewDetailItem = null;
+    openDetailDialog('Held conversation', 'Loading conversation…', '<p class="mutetext" role="status">Loading the available message text…</p>');
+    $('detail-dialog').classList.add('review-detail-dialog');
+    try {
+      const res = await fetch('/api/review?itemId=' + encodeURIComponent(id), { cache: 'no-store', signal: AbortSignal.any([reviewDetailController.signal, AbortSignal.timeout(20000)]) });
+      if (sequence !== reviewDetailSequence || !$('detail-dialog').open) return;
+      if (res.status === 401) authExpired = true;
+      if (!res.ok) throw new Error(res.status === 401 ? 'Sign in again to inspect this conversation.' : 'This conversation could not be loaded. Close this panel and refresh the queue.');
+      const detail = await res.json();
+      if (!detail.item || detail.item.id !== id || !Array.isArray(detail.messages)) throw new Error('The conversation response could not be read. Refresh the queue and try again.');
+      if (sequence !== reviewDetailSequence || !$('detail-dialog').open) return;
+      reviewDetailItem = detail.changed || detail.blockedReason ? { ...detail.item, reviewable: false } : detail.item;
+      if (reviewWorkspace.selected.has(id) && (detail.changed || !reviewActionable(reviewDetailItem) || reviewWorkspace.selected.get(id).revision !== detail.item.revision)) {
+        reviewWorkspace.selected.delete(id); reviewWorkspace.notice = 'A changed conversation was removed from your selection.';
+      }
+      if (reviewWorkspace.snapshot) reviewWorkspace.snapshot.items = reviewWorkspace.snapshot.items.map((item) => item.id === id ? reviewDetailItem : item);
+      $('dialog-title').textContent = detail.item.subject || '(No subject)'; $('dialog-body').innerHTML = reviewConversationHtml(detail);
+      renderReviewWorkspace(); refreshActionControls();
+    } catch (error) {
+      if (sequence !== reviewDetailSequence || !$('detail-dialog').open) return;
+      $('dialog-body').innerHTML = '<p class="form-error" role="alert">' + esc(error.message) + '</p>';
+      refreshActionControls();
+    }
+  }
+  function openBulkReviewEditor(chosen = [...reviewWorkspace.selected.values()]) {
+    if (!reviewCanWrite() || !chosen.length || chosen.some((item) => !reviewActionable(item))) return;
+    const items = chosen.map((item) => ({ ...item })), total = items.length;
+    const options = '<option value="" selected disabled>Choose a category</option>' + REVIEW_CATEGORIES.map((category) => '<option value="' + esc(category) + '">' + esc(category) + '</option>').join('');
+    openActionEditor({ title: 'Classify ' + total + (total === 1 ? ' conversation' : ' conversations'), description: 'One category will be applied to every selected conversation after its current messages are checked. Changed or incomplete conversations stay held.', submit: 'Queue category changes', action: 'review.bulkResolve',
+      fields: '<ul class="review-confirm-list">' + items.map((item) => '<li>' + esc(item.subject || '(No subject)') + ' · ' + esc(item.sender) + '</li>').join('') + '</ul>' + field('Category for every selected conversation', '<select name="category" required>' + options + '</select>') + '<p id="review-category-effect" class="review-effect">' + esc(reviewCategoryEffect('', total)) + '</p><label class="form-check"><input type="checkbox" name="rememberPreference"><span>Remember this preference</span></label><p class="automation-detail">Use the confirmed sender and category as guidance for future email classifications and reviews. This does not guarantee automatic filing; every conversation still goes through the review rules.</p>',
+      input: (form) => {
+        if (!reviewCanWrite()) throw new Error('Refresh the queue before applying a category.');
+        const current = new Map((reviewWorkspace.snapshot?.items || []).map((item) => [item.id, item]));
+        if (items.some((item) => !reviewActionable(current.get(item.id)) || current.get(item.id).revision !== item.revision)) throw new Error('A selected conversation changed. Close this form and inspect the latest queue before applying a category.');
+        return bulkReviewInput(items, String(form.get('category') || ''), form.has('rememberPreference'));
+      },
+      onSuccess: (result) => {
+        reviewWorkspace.selected.clear(); reviewWorkspace.latestCommand = result?.reviewCommand || null;
+        const receipt = result?.reviewReceipt, queued = (receipt?.items || []).filter((item) => item.status === 'queued').length, rejected = (receipt?.items || []).filter((item) => item.status === 'rejected').length;
+        reviewWorkspace.notice = receipt ? queued + ' queued' + (rejected ? ' · ' + rejected + ' rejected; inspect the current conversation before retrying.' : '. Follow per-conversation progress below.') : 'Category changes queued. Follow progress below.';
+        void refreshReviewQueue(); return reviewWorkspace.notice;
+      }
+    });
+    if (actionEditor) actionEditor.reviewItems = items;
+  }
+  function forgetReviewPreference(id) {
+    if (!reviewCanWrite()) return;
+    const preference = reviewWorkspace.snapshot?.preferences?.find((item) => item.id === id); if (!preference) return;
+    openActionEditor({ title: 'Forget sender preference', description: 'Remove this guidance from future email classifications and reviews. Existing Gmail labels and tasks stay as they are.', submit: 'Forget preference', action: 'review.forgetPreference',
+      fields: '<div class="review-context"><strong>' + esc(preference.sender) + '</strong><p>' + esc(preference.account) + '</p><p>' + esc(preference.category) + '</p></div>', input: () => ({ preferenceId: id }),
+      onSuccess: () => { void refreshReviewQueue(); return 'Sender preference removed.'; }
+    });
+  }
+
   // ---- tab routing ----
   const TABS = ["time", "today", "tasks", "triage"];
   function currentTab() {
@@ -1599,6 +1891,7 @@ export const PORTAL_HTML = `<!doctype html>
       link.classList.toggle("active", k === t);
       if (k === t) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current");
     }
+    if (t === 'triage') void refreshReviewQueue();
   }
   window.addEventListener("hashchange", showTab);
   $("show-done").addEventListener("change", renderTasks);
@@ -1633,14 +1926,32 @@ export const PORTAL_HTML = `<!doctype html>
   $("review-queue").addEventListener("click", (event) => {
     const item = event.target.closest("[data-review-item]"); if (item) openReviewEditor(item.dataset.reviewItem);
   });
+  $('review-search-form').addEventListener('submit', (event) => { event.preventDefault(); searchReviewQueue(); });
+  $('review-reset').addEventListener('click', () => searchReviewQueue(true));
+  $('review-previous').addEventListener('click', () => changeReviewPage(-1));
+  $('review-next').addEventListener('click', () => changeReviewPage(1));
+  $('review-clear').addEventListener('click', () => { if (!actionBusy) { reviewWorkspace.selected.clear(); reviewWorkspace.notice = 'Selection cleared.'; renderReviewWorkspace(); } });
+  $('review-bulk-button').addEventListener('click', () => openBulkReviewEditor());
+  $('review-select-page').addEventListener('change', (event) => {
+    if (!reviewCanWrite()) return;
+    reviewWorkspace.selected.clear();
+    if (event.target.checked) for (const item of (reviewWorkspace.snapshot?.items || []).filter(reviewActionable).slice(0, 50)) reviewWorkspace.selected.set(item.id, item);
+    reviewWorkspace.notice = ''; refreshReviewControls();
+  });
+  $('review-results').addEventListener('change', (event) => { if (event.target.hasAttribute('data-review-select')) selectReviewItem(event.target.dataset.reviewSelect, event.target.checked); });
+  $('review-results').addEventListener('click', (event) => { const item = event.target.closest('[data-review-inspect]'); if (item) void openReviewConversation(item.dataset.reviewInspect); });
+  $('review-command-progress').addEventListener('click', (event) => { const item = event.target.closest('[data-review-inspect]'); if (item) void openReviewConversation(item.dataset.reviewInspect); });
+  $('review-preference-list').addEventListener('click', (event) => { const item = event.target.closest('[data-review-forget]'); if (item) forgetReviewPreference(item.dataset.reviewForget); });
   $("new-task-button").addEventListener("click", () => openTaskEditor());
   $("new-project-button").addEventListener("click", openProjectEditor);
   $("log-time-button").addEventListener("click", () => openTimeEditor());
   $("dialog-body").addEventListener("click", (event) => {
     const edit = event.target.closest("[data-entry-edit]"); if (edit) openTimeEditor(edit.dataset.entryEdit);
     if (event.target.closest("[data-log-time]")) openTimeEditor();
+    if (event.target.closest('[data-review-detail-apply]') && reviewDetailItem) openBulkReviewEditor([reviewDetailItem]);
   });
   $("action-fields").addEventListener("input", (event) => {
+    if (actionEditor?.action === 'review.bulkResolve' && event.target.name === 'category') $('review-category-effect').textContent = reviewCategoryEffect(event.target.value, actionEditor.reviewItems.length);
     const project = actionEditor?.project;
     if (project && canAct() && !actionEditor.uncertain && event.target.name === 'projectSearch') {
       project.query = event.target.value; project.open = true; project.activeIndex = -1; renderProjectPicker();
@@ -1700,6 +2011,7 @@ export const PORTAL_HTML = `<!doctype html>
   $("detail-dialog").addEventListener("click", (event) => {
     if (event.target === $("detail-dialog")) $("detail-dialog").close();
   });
+  $('detail-dialog').addEventListener('close', () => { reviewDetailSequence++; reviewDetailController?.abort(); reviewDetailItem = null; });
 
   function tick() {
     if (!data || !data.activeTimer) return;
@@ -1721,6 +2033,7 @@ export const PORTAL_HTML = `<!doctype html>
       authExpired = false;
       render(); tick(); renderConnection();
       void refreshAutomation();
+      void refreshReviewQueue();
     } catch {
       if (sequence !== refreshSequence) return;
       dataAvailable = false;

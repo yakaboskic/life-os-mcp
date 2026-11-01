@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage } from "node:http";
 import { equalToken } from "./security.js";
+import { readRoute } from "../../deploy/web-gateway/read-routes.mjs";
 
 export interface PrivateWebBridgeOptions {
   executeAction?: (body: unknown, actor: string) => Promise<unknown>;
@@ -25,14 +26,14 @@ function actionBody(req: IncomingMessage): Promise<unknown> {
 /** Dedicated private gateway capability. Writes call the authoritative daemon, never an unauthenticated local HTTP route. */
 export function createPrivateWebBridge(token: string, privateHost: string, webPort: number, options: PrivateWebBridgeOptions = {}) {
   if (token.length < 32 || !/^10\.53\.0\.(?:[1-9]|[1-9]\d|1\d\d|2[0-4]\d|25[0-4])$/.test(privateHost)) throw new Error("Private web bridge requires a dedicated token and LifeOS VPC address");
-  const allowed = new Set(["/api/data", "/api/triage", "/api/jobs", "/api/automation"]);
   const server = createServer(async (req, res) => {
     const reply = (status: number, value: unknown) => {
       res.writeHead(status, { "content-type": "application/json", "cache-control": "private, no-store", "x-content-type-options": "nosniff" }).end(JSON.stringify(value));
     };
     if (req.headers.origin || req.headers.host !== `${privateHost}:4749` || !equalToken(req.headers.authorization ?? "", `Bearer ${token}`)) { reply(401, { error: "Unauthorized" }); return; }
     const isAction = req.method === "POST" && req.url === "/api/actions";
-    if (!isAction && (req.method !== "GET" || !allowed.has(req.url ?? "") || req.headers["transfer-encoding"] || Number(req.headers["content-length"] ?? 0) !== 0)) { reply(404, { error: "Not found" }); return; }
+    const read = readRoute(req.url ?? "");
+    if (!isAction && (req.method !== "GET" || !read || req.headers["transfer-encoding"] || Number(req.headers["content-length"] ?? 0) !== 0)) { reply(404, { error: "Not found" }); return; }
     if (isAction) {
       const actor = req.headers["x-life-os-actor"];
       if (typeof actor !== "string" || actor.length > 254 || !/^[a-z0-9][a-z0-9._+-]*@[a-z0-9.-]+\.[a-z0-9-]+$/.test(actor)) { reply(400, { error: "Invalid action actor" }); return; }
@@ -49,7 +50,7 @@ export function createPrivateWebBridge(token: string, privateHost: string, webPo
       return;
     }
     try {
-      const upstream = await fetch(`http://127.0.0.1:${webPort}${req.url}`, { redirect: "error", signal: AbortSignal.timeout(15_000) });
+      const upstream = await fetch(`http://127.0.0.1:${webPort}${read}`, { redirect: "error", signal: AbortSignal.timeout(15_000) });
       if (!RELAY_STATUSES.has(upstream.status) || !upstream.headers.get("content-type")?.startsWith("application/json")) { await upstream.body?.cancel(); reply(502, { error: "LifeOS unavailable" }); return; }
       const reader = upstream.body?.getReader(); if (!reader) throw new Error("Missing response");
       const chunks: Uint8Array[] = []; let bytes = 0;

@@ -26,7 +26,7 @@ it("shares tracker state across remote clients and enforces machine capabilities
     const added=await clients[0]!.callTool({name:"track_add_task",arguments:{title:"Shared remote task"}});expect(added.isError).toBeFalsy();
     const list=await clients[1]!.callTool({name:"track_overview",arguments:{}});expect(JSON.stringify(list)).toContain("Shared remote task");
     const snapshot=await(await fetch(webBase+"/api/data")).json() as any;
-    expect(snapshot.capabilities).toEqual({actions:false,automation:true});
+    expect(snapshot.capabilities).toEqual({actions:false,automation:true,reviewQueue:true});
     const headers={authorization:`Bearer ${interactive}`,"content-type":"application/json"};
     const start={requestId:"cross-client-start",action:"timer.start",input:{taskId:snapshot.tasks[0].id,expectedTimerRevision:null}};
     expect((await fetch(base+"/v1/actions",{method:"POST",headers,body:JSON.stringify(start)})).status).toBe(200);

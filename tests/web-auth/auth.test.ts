@@ -193,4 +193,20 @@ describe("authenticated browser actions", () => {
     expect((await handler(request("/api/actions?x=1", { method: "POST", headers: headers(), body }))).status).toBe(404);
     expect(calls).toBe(1);
   });
+  it("authenticates bounded review reads and forwards the full canonical query", async () => {
+    const urls: string[] = [];
+    const handler = createWebHandler({ env, now: () => NOW, fetch: (async (url, options) => {
+      urls.push(String(url)); expect(options?.method).toBe("GET");
+      expect((options?.headers as Record<string, string>)["x-life-os-actor"]).toBeUndefined();
+      return Response.json({ items: [] });
+    }) as typeof fetch });
+    expect((await handler(request("/api/reviews?limit=50"))).status).toBe(401);
+    expect((await handler(request("/api/review?itemId=one"))).status).toBe(401);
+    expect((await handler(request("/api/reviews?bucket=needsDecision&search=hello%20world&limit=50", { headers: headers() }))).status).toBe(200);
+    expect((await handler(request("/api/review?itemId=one", { headers: headers() }))).status).toBe(200);
+    expect(urls).toEqual([config.gatewayUrl + "/api/reviews?bucket=needsDecision&search=hello+world&limit=50", config.gatewayUrl + "/api/review?itemId=one"]);
+    expect((await handler(request("/api/review?itemId=one", { headers: { ...headers(), "sec-fetch-site": "cross-site" } }))).status).toBe(403);
+    for (const path of ["/api/reviews?limit=51", "/api/reviews?limit=1&limit=2", "/api/review?itemId=one&url=https://evil.test"]) expect((await handler(request(path, { headers: headers() }))).status).toBe(404);
+    expect(urls).toHaveLength(2);
+  });
 });

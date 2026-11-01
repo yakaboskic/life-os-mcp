@@ -38,9 +38,9 @@ For a company-wide policy site with an app selector, set the branding URL to the
 
 Sessions last at most eight hours in an HttpOnly, Secure, SameSite=Lax `__Host-` cookie. Login uses state, nonce and PKCE. ID tokens are signature-verified with Google's published keys and checked for issuer, audience, expiry, nonce and the exact verified email. Each request checks the signed session against the current owner setting, so changing the allowlisted account rejects the previous owner's sessions when that configuration is deployed. Logout is a same-origin POST. Rotate the session secret to revoke all sessions immediately.
 
-The proxy permits only `GET /api/data`, `/api/triage`, `/api/jobs`, `/api/automation`, and `POST /api/actions`. Actions use JSON `{requestId, action, input}`, limited to 64 KiB. The function requires a valid owner session, an exact `Origin`, and `Sec-Fetch-Site: same-origin` before forwarding any action. It derives `x-life-os-actor` from the verified session email and ignores a browser-supplied actor. Browser cookies, query parameters and authorization headers are never forwarded; the gateway bearer stays server-side.
+The proxy permits only `GET /api/data`, `/api/triage`, `/api/jobs`, `/api/automation`, `/api/reviews`, `/api/review`, and `POST /api/actions`. Only the two review read endpoints accept bounded, allowlisted query parameters; all layers validate them independently. Actions use JSON `{requestId, action, input}`, limited to 64 KiB. The function requires a valid owner session, an exact `Origin`, and `Sec-Fetch-Site: same-origin` before forwarding any action. It derives `x-life-os-actor` from the verified session email and ignores a browser-supplied actor. Browser cookies and authorization headers are never forwarded; the gateway bearer stays server-side.
 
-Cloud Run and the VM independently enforce the route/method allowlists, body bounds and actor format. The VM passes actions to the authoritative daemon callback; the local dashboard has no unauthenticated write endpoint. The daemon validates the operation and input, deduplicates request IDs, checks expected revisions and records the actor. Conflicts and unavailable services preserve their HTTP status through both proxy layers; the UI must retain the user's input and show the error instead of assuming success. Agent work is queued asynchronously and read through status endpoints. Review suggestions require explicit approval; no arbitrary command, MCP endpoint or backend administrator token is exposed.
+Cloud Run and the VM independently enforce the route/method allowlists, body bounds and actor format. The VM passes actions to the authoritative daemon callback; the local dashboard has no unauthenticated write endpoint. The daemon validates the operation and input, deduplicates request IDs, checks expected revisions and records the actor. Conflicts and unavailable services preserve their HTTP status through both proxy layers; the UI must retain the user's input and show the error instead of assuming success. Agent work is queued asynchronously and read through status endpoints. The review workspace applies categories only after explicit confirmation; scheduled Claude reviews can automatically apply eligible clear decisions. No arbitrary command, MCP endpoint or backend administrator token is exposed.
 
 The VM and gateway deploy sequentially through GitHub, while Vercel deploys independently from the same repository. New UI controls use backend capabilities so an older VM stays usable during rollout. See the [operations runbook](../docs/gcp-operations.md#gateway-deployment-from-github) for enabling the gateway's verified-image deployment stage.
 
@@ -81,3 +81,28 @@ Only `name` is required; it is trimmed and must contain 1–200 characters. `pro
 From JavaScript on the signed-in LifeOS page, send either command with `fetch('/api/actions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(command) })`. The browser supplies the session cookie and same-origin headers. Generate a fresh `requestId` with `crypto.randomUUID()` for each new command; retain the same ID and payload when retrying an uncertain response. Case-insensitive duplicate project names return HTTP 409 (`PROJECT_EXISTS`); an unknown product returns HTTP 404 (`PRODUCT_MISSING`). Neither creates a project.
 
 Connected agents can pass the same command object to `lifeos_action`, using `lifeos_snapshot` to discover product and project IDs. The public web endpoint requires a signed-in browser session; agent credentials stay on the existing private MCP connection.
+
+## Reviewing held email
+
+Open **Triage → Review inbox**. Search matches sender and subject across the full held queue. Filter by configured Gmail account, suggested category, or review status: awaiting Claude, needs your decision, needs more context, or queued for changes. Pages contain at most 50 conversations. Selecting a page selects only eligible visible conversations; changing filters or pages clears selection. Refresh removes selections whose revision changed, and writes require a fresh online queue.
+
+Use **Inspect conversation** to read a bounded plain-text preview and the classifier's explanation, or open the thread in Gmail. Reading a preview does not mark the email read. Missing or truncated context stays held. For eligible conversations, select individual rows or the page, then **Choose category**. The confirmation shows the affected conversations and changes before you queue them. Applying a category labels and archives the reviewed messages; action categories may also star messages and create or update a LifeOS task. It does not send, trash or mark messages read.
+
+Choices are queued durably even while Claude is working. The single VM worker checks current messages and labels before applying each choice. Changed or incomplete conversations stay held and appear in the per-conversation results. A queued human choice takes precedence over a concurrent Claude proposal. Retrying an uncertain submission with the same request ID returns the original receipt rather than repeating Gmail writes.
+
+**Remember this preference** is off by default. When explicitly selected and the decision is successfully applied, LifeOS can save the exact sender/category for that Gmail account as guidance for future Jev classifications and Claude reviews. Saving also requires an unambiguous sender identity and unchanged preference state; each outcome reports whether it was saved. This is not model training or an unconditional sender rule; evidence and policy checks still apply. Expand **Remembered sender preferences** to remove guidance. Removal does not undo Gmail changes already applied.
+
+Authenticated reads are `GET /api/reviews` with optional `search`, `bucket`, `account`, `category`, `limit` (1–50), and the returned opaque `cursor`, plus `GET /api/review?itemId=...`. Reuse a cursor only with the same filters. Agents have equivalent `lifeos_review_queue` and `lifeos_review_detail` MCP tools. Queue an explicitly chosen human decision through `lifeos_action` or the existing authenticated `POST /api/actions`:
+
+```json
+{
+  "requestId": "unique-human-review-request-id",
+  "action": "review.bulkResolve",
+  "input": {
+    "items": [{"itemId": "returned-item-id", "revision": "returned-revision", "category": "NEWSLETTER"}],
+    "rememberPreference": false
+  }
+}
+```
+
+Each batch allows 1–50 unique item IDs. Use the exact returned revision. The response contains a durable receipt; subsequent queue responses include `pendingCommands` with per-item progress. `review.forgetPreference` accepts `{ "preferenceId": "returned-preference-id" }`. Agents must not label their own classifications as human approval or opt into remembering preferences without the user's explicit choice. This workspace does not enable additional Gmail accounts or change the scheduled Claude quota.

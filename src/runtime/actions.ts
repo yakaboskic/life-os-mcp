@@ -11,7 +11,7 @@ const instant = z.string().datetime({ offset: true }).refine(value => Number.isF
 export const actionEnvelope = z.object({
   requestId: z.string().regex(/^[a-zA-Z0-9_-]{8,128}$/),
   action: z.enum(["timer.start", "timer.stop", "timer.cancel", "project.create", "task.create", "task.update", "time.log", "time.update",
-    "automation.run", "automation.schedule", "review.resolve"]),
+    "automation.run", "automation.schedule", "review.resolve", "review.bulkResolve", "review.forgetPreference"]),
   input: z.record(z.unknown()),
 }).strict();
 const schemas = {

@@ -9,10 +9,13 @@ import { PWA_ASSETS } from "./pwa.js";
 import { safeBrowserRequest } from "../runtime/security.js";
 import type { JobStatus, JobRun } from "../jobs/types.js";
 import { withRevision } from "../runtime/actions.js";
+import { readRoute } from "../../deploy/web-gateway/read-routes.mjs";
 
 export interface WebFeatures {
   actions?: boolean;
   automationSnapshot?: () => unknown;
+  reviewQueue?: (query: unknown) => unknown;
+  reviewDetail?: (itemId: string, signal: AbortSignal) => Promise<unknown>;
 }
 
 const ENTRY_WINDOW_DAYS = 90;
@@ -26,7 +29,7 @@ const ENTRY_WINDOW_DAYS = 90;
 export function createWebServer(config: LifeOsConfig, jobSnapshot?: () => {status:JobStatus;runs:JobRun[]}, features: WebFeatures = {}): Server {
   const store = new TrackStore(config);
 
-  return createServer((req, res) => {
+  return createServer(async (req, res) => {
     if (!safeBrowserRequest(req)) { res.writeHead(403).end("Invalid origin or host"); return; }
     res.setHeader("x-content-type-options", "nosniff");
     res.setHeader("content-security-policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; worker-src 'self'; manifest-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
@@ -35,6 +38,28 @@ export function createWebServer(config: LifeOsConfig, jobSnapshot?: () => {statu
       return;
     }
     const path = new URL(req.url ?? "/", "http://localhost").pathname;
+    if (path === "/api/reviews" || path === "/api/review") {
+      const send = (status: number, value: unknown) => res.writeHead(status, { "content-type": "application/json", "cache-control": "private, no-store" }).end(JSON.stringify(value));
+      const route = readRoute(req.url ?? "");
+      if (!route) { send(400, { error: "Invalid review query", code: "REVIEW_QUERY_INVALID" }); return; }
+      const url = new URL(route, "http://localhost");
+      if (!features.reviewQueue || !features.reviewDetail) { send(503, { error: "Review workspace unavailable" }); return; }
+      const controller = new AbortController();
+      res.on("close", () => { if (!res.writableEnded) controller.abort(); });
+      try {
+        if (path === "/api/reviews") {
+          const query: Record<string, unknown> = Object.fromEntries(url.searchParams);
+          if (query.limit !== undefined) query.limit = Number(query.limit);
+          send(200, features.reviewQueue(query));
+        } else send(200, await features.reviewDetail(url.searchParams.get("itemId")!, AbortSignal.any([controller.signal, AbortSignal.timeout(8_000)])));
+      } catch (error) {
+        if (res.destroyed) return;
+        const code = error instanceof Error && /^REVIEW_[A-Z_]+$/.test(error.message) ? error.message : "REVIEW_UNAVAILABLE";
+        const invalid = ["REVIEW_QUERY_INVALID", "REVIEW_CURSOR_INVALID", "REVIEW_INVALID_REQUEST", "REVIEW_ACCOUNT_NOT_CONFIGURED"];
+        send(code === "REVIEW_NOT_FOUND" ? 404 : invalid.includes(code) ? 400 : code === "REVIEW_STALE_CONTEXT" ? 409 : 503, { error: code, code });
+      }
+      return;
+    }
     const asset=PWA_ASSETS[path];
     if(asset) {
       res.writeHead(200,{"content-type":asset.contentType,"cache-control":"no-store","service-worker-allowed":"/"}).end(asset.body);
@@ -71,7 +96,7 @@ export function createWebServer(config: LifeOsConfig, jobSnapshot?: () => {statu
       });
       const payload = {
         generatedAt: new Date().toISOString(),
-        capabilities: { actions: features.actions === true, automation: !!features.automationSnapshot },
+        capabilities: { actions: features.actions === true, automation: !!features.automationSnapshot, ...(features.reviewQueue && features.reviewDetail ? { reviewQueue: true } : {}) },
         weeklyTargetHours: reg.weeklyTargetHours,
         activeTimer: store.getTimer() ? withRevision(store.getTimer()!) : null,
         statusSemantics: STATUS_SEMANTICS,

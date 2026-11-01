@@ -23,6 +23,17 @@ function send(url: string, options: RequestInit = {}): Promise<Response> {
 }
 
 describe("private browser action capability", () => {
+  it("preserves bounded review query values and rejects arbitrary parameters", async () => {
+    const paths: string[] = [];
+    const upstream = createServer((req, res) => { paths.push(req.url!); res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ items: [] })); });
+    const base = `http://127.0.0.1:${await listen(createPrivateWebBridge(token, host, await listen(upstream)))}`;
+    const result = await send(base + "/api/reviews?search=hello%20world&limit=50&bucket=needsDecision", { headers: headers() });
+    expect(result.status).toBe(200); expect(result.headers.get("cache-control")).toContain("no-store");
+    expect(paths).toEqual(["/api/reviews?search=hello+world&limit=50&bucket=needsDecision"]);
+    expect((await send(base + "/api/review?itemId=one", { headers: headers() })).status).toBe(200);
+    for (const path of ["/api/reviews?limit=51", "/api/reviews?url=http://evil.test", "/api/review?itemId=one&itemId=two", "/api/data?search=anything"]) expect((await send(base + path, { headers: headers() })).status).toBe(404);
+    expect(paths).toHaveLength(2);
+  });
   it("calls only the daemon callback with decoded JSON and validated actor", async () => {
     const calls: unknown[] = [];
     const base = await fixture({ executeAction: async (input, actor) => { calls.push({ input, actor }); return { ok: true }; } });

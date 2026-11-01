@@ -63,7 +63,7 @@ export class GmailJobGateway implements MailGateway {
   }
   async thread(account: string, id: string, signal: AbortSignal): Promise<MailThread> {
     return this.manager.withClient(account, async (gmail) => {
-      const result = await gmail.users.threads.get({ userId: "me", id, format: "full" }, { signal, timeout: 30_000 });
+      const result = await gmail.users.threads.get({ userId: "me", id, format: "full" }, { signal, timeout: 30_000, maxContentLength: 4_000_000 });
       return { id, messages: (result.data.messages ?? []).map((message) => {
         const parsed = parseMessage(message, { includeBody: true, maxBodyChars: 12_000 });
         if (!message.id || !message.internalDate || !Number.isFinite(Number(message.internalDate))) throw new Error("GMAIL_INVALID_MESSAGE");

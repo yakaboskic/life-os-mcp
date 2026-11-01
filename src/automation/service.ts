@@ -9,18 +9,22 @@ import { openDatabase } from "../state/database.js";
 import { TrackStore } from "../toolsets/track/store.js";
 import { GmailAccountManager, type GmailManagerLike } from "../toolsets/gmail/client.js";
 import { easternDay } from "../jobs/service.js";
-import { CATEGORIES, type Category, type JobRun, type JobService } from "../jobs/types.js";
+import { CATEGORIES, type Category, type JobRun, type JobService, type ReviewItem } from "../jobs/types.js";
 import { ClaudeProvider, REVIEW_MAX_TOKENS, BRIEF_MAX_TOKENS, reviewSchema, briefSchema, StructuredOutputError } from "./provider.js";
 import { ClaudeCodeProvider } from "./claude-code.js";
 import { GmailBriefDelivery } from "./delivery.js";
-import { AutomationStore, automationLimits, digest, type StoredRun } from "./store.js";
-import { AUTOMATION_POLICY, type AutomationService, type AutomationSnapshot, type AutomationProvider, type BriefDeliveryGateway, type BriefDelivery, type BriefInput, type BriefSource, type BriefingArtifact, type ProviderResult } from "./types.js";
+import { AutomationStore, automationLimits, digest, type StoredRun, type HumanReviewCommand } from "./store.js";
+import { AUTOMATION_POLICY, type AutomationService, type AutomationSnapshot, type AutomationProvider, type BriefDeliveryGateway, type BriefDelivery, type BriefInput, type BriefSource, type BriefingArtifact, type ProviderResult, type AutomationAction, type ReviewQueueQuery, type ReviewQueuePage, type ReviewQueueItem, type ReviewDetail, type ReviewCommandProgress } from "./types.js";
 export type { AutomationService, AutomationSnapshot } from "./types.js";
 
 export interface AutomationDependencies { jobs: JobService; manager?: GmailManagerLike; track?: TrackStore; provider?: AutomationProvider; delivery?: BriefDeliveryGateway; now?: () => Date; deadlineMs?: number }
 const runSchema = z.object({ kind: z.enum(["review", "brief", "daily"]) }).strict();
 const scheduleSchema = z.object({ enabled: z.boolean().optional(), localTime: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/).optional(), reviewEnabled: z.boolean().optional(), briefEnabled: z.boolean().optional() }).strict();
 const resolveSchema = z.object({ itemId: z.string().min(1).max(100), category: z.enum(CATEGORIES) }).strict();
+const bulkSchema = z.object({ items: z.array(z.object({ itemId: z.string().min(1).max(100), revision: z.string().regex(/^[a-f0-9]{64}$/), category: z.enum(CATEGORIES) }).strict()).min(1).max(50).refine(items => new Set(items.map(item => item.itemId)).size === items.length), rememberPreference: z.boolean().default(false) }).strict();
+const forgetSchema = z.object({ preferenceId: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
+const queueSchema = z.object({ bucket: z.enum(["all", "awaitingAgent", "needsDecision", "needsContext", "queued"]).default("all"), search: z.string().trim().max(200).default(""), account: z.string().min(1).max(320).optional(), category: z.enum(CATEGORIES).optional(), limit: z.number().int().min(1).max(50).default(50), cursor: z.string().min(1).max(512).optional() }).strict();
+const cursorSchema = z.object({ at: z.string().max(40), id: z.string().min(1).max(100), filter: z.string().length(64) }).strict();
 const fmt = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
 const parts = (date: Date) => Object.fromEntries(fmt.formatToParts(date).filter(item => item.type !== "literal").map(item => [item.type, Number(item.value)]));
 export function scheduleTime(now: Date, localTime: string, next = true): string {
@@ -41,6 +45,7 @@ class DurableAutomationService implements AutomationService {
   private readonly store: AutomationStore; private readonly provider: AutomationProvider; private readonly delivery: BriefDeliveryGateway; private readonly track: TrackStore;
   private readonly jobs: JobService; private readonly now: () => Date; private running: Promise<void> | null = null; private paused = false;
   private controller: AbortController | null = null;
+  private detailReads = 0;
   private readonly account: string; private readonly recipient: string;
   constructor(private readonly config: LifeOsConfig, private readonly logger: Logger, private readonly deps: AutomationDependencies) {
     this.store = new AutomationStore(openDatabase(config), automationLimits(config.env)); this.store.recover(new Date().toISOString()); this.jobs = deps.jobs;
@@ -51,6 +56,49 @@ class DurableAutomationService implements AutomationService {
   }
   get activeCount(): number { return this.running ? 1 : 0; }
   private mailConfigured(): boolean { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(this.account) && this.account === this.recipient && this.jobs.status().configuredAccounts.includes(this.account); }
+  private progress(command: HumanReviewCommand): ReviewCommandProgress { const { requestId, runId, state, createdAt, finishedAt, items } = command; return { requestId, runId, state, createdAt, finishedAt, items }; }
+  private commandProgress(): ReviewCommandProgress[] { return [...new Map([...this.store.activeHumanCommands(), ...this.store.humanCommands()].map(command => [command.requestId, command])).values()].slice(0, 50).map(command => this.progress(command)); }
+  private queueRows(): ReviewQueueItem[] {
+    const accounts = this.jobs.status().configuredAccounts;
+    const rows = new Map(this.jobs.reviews().filter(item => item.mode === "apply" && accounts.includes(item.account)).map(item => [item.id, item]));
+    for (const command of this.store.activeHumanCommands()) for (const item of command.items.filter(item => ["queued", "accepted"].includes(item.status))) {
+      const captured = command.captured[item.itemId];
+      if (captured && accounts.includes(captured.account) && !rows.has(item.itemId)) rows.set(item.itemId, captured);
+    }
+    return [...rows.values()].map(item => {
+      const record = item.revision ? this.store.reviewRecord(this.store.reviewKey(item.id, item.revision, AUTOMATION_POLICY)) : undefined;
+      const queuedCommandId = this.store.humanIntent(item.id);
+      const bucket = queuedCommandId ? "queued" : item.reason === "INSUFFICIENT_OR_TRUNCATED_CONTEXT" ? "needsContext" : item.reviewable && !record ? "awaitingAgent" : "needsDecision";
+      return { ...item, bucket, reviewable: !!item.reviewable && !queuedCommandId, ...(queuedCommandId ? { queuedCommandId } : {}), ...(record ? { agentReview: { category: (record.category ?? null) as Category | null, reason: record.reason, model: record.model, createdAt: record.createdAt } } : {}) } as ReviewQueueItem;
+    });
+  }
+  reviewQueue(query: ReviewQueueQuery = {}): ReviewQueuePage {
+    const parsed = queueSchema.safeParse(query); if (!parsed.success) throw new Error("REVIEW_QUERY_INVALID");
+    const value = parsed.data, accounts = this.jobs.status().configuredAccounts;
+    if (value.account && !accounts.includes(value.account)) throw new Error("REVIEW_ACCOUNT_NOT_CONFIGURED");
+    const all = this.queueRows(), counts = { total: all.length, awaitingAgent: 0, needsDecision: 0, needsContext: 0, queued: 0 };
+    for (const item of all) counts[item.bucket]++;
+    const search = value.search.toLowerCase();
+    const rows = all.filter(item => (value.bucket === "all" || item.bucket === value.bucket) && (!value.account || item.account === value.account) && (!value.category || item.category === value.category || item.agentReview?.category === value.category) && (!search || `${item.sender}\n${item.subject}`.toLowerCase().includes(search))).sort((a,b) => a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+    const filter = digest([value.bucket, search, value.account, value.category]); let after: z.infer<typeof cursorSchema> | undefined;
+    if (value.cursor) { try { after = cursorSchema.parse(JSON.parse(Buffer.from(value.cursor, "base64url").toString("utf8"))); if (after.filter !== filter) throw Error(); } catch { throw new Error("REVIEW_CURSOR_INVALID"); } }
+    const remaining = after ? rows.filter(item => item.createdAt > after!.at || item.createdAt === after!.at && item.id > after!.id) : rows;
+    const items = remaining.slice(0,value.limit), last = items.at(-1);
+    return { items, total: rows.length, limit: value.limit, nextCursor: remaining.length > items.length && last ? Buffer.from(JSON.stringify({ at: last.createdAt, id: last.id, filter })).toString("base64url") : null, counts, accounts, preferences: this.jobs.senderPreferences?.() ?? [], pendingCommands: this.commandProgress() };
+  }
+  async reviewDetail(itemId: string, signal?: AbortSignal): Promise<ReviewDetail> {
+    if (!itemId || itemId.length > 100) throw new Error("REVIEW_INVALID_REQUEST");
+    if (!this.jobs.inspectReview) throw new Error("REVIEW_UNAVAILABLE");
+    if (this.detailReads >= 2) throw new Error("REVIEW_BUSY");
+    this.detailReads++;
+    try {
+      const detail = await this.jobs.inspectReview(itemId, AbortSignal.any([signal ?? new AbortController().signal, AbortSignal.timeout(8_000)]));
+      const item = this.queueRows().find(item => item.id === itemId);
+      if (!item) throw new Error("REVIEW_NOT_FOUND");
+      return { ...detail, item: { ...item, reviewable: item.reviewable && !detail.changed && !detail.truncated } };
+    } catch (error) { if (error instanceof Error && /^REVIEW_[A-Z_]+$/.test(error.message)) throw error; throw new Error("REVIEW_UNAVAILABLE"); }
+    finally { this.detailReads--; }
+  }
   snapshot(): AutomationSnapshot {
     const settings = this.store.settings(); const accounts = this.jobs.status().configuredAccounts;
     const allReviews = this.jobs.reviews().filter(item => item.mode === "apply" && accounts.includes(item.account));
@@ -64,9 +112,9 @@ class DurableAutomationService implements AutomationService {
       const record = item.revision ? this.store.reviewRecord(this.store.reviewKey(item.id, item.revision, AUTOMATION_POLICY)) : undefined;
       return { ...item, ...(record ? { agentReview: { category: (record.category ?? null) as Category | null, reason: record.reason, model: record.model, createdAt: record.createdAt } } : {}) };
     });
-    return { configured: this.provider.configured() && this.mailConfigured(), model: this.provider.model, paused: this.paused, activeCount: this.activeCount, reviews, backlog, runs: this.store.runs(), schedule: { ...settings, nextRunAt: scheduleTime(this.now(), settings.localTime) }, briefing: this.store.briefing() ?? null, deliveries: this.store.deliveries(), usage: this.store.usage(easternDay(this.now())), recentDecisions: this.store.decisions().filter(item => accounts.includes(item.account)).slice(0, 20) };
+    return { configured: this.provider.configured() && this.mailConfigured(), model: this.provider.model, paused: this.paused, activeCount: this.activeCount, reviews, backlog, reviewCommands: this.commandProgress(), runs: this.store.runs(), schedule: { ...settings, nextRunAt: scheduleTime(this.now(), settings.localTime) }, briefing: this.store.briefing() ?? null, deliveries: this.store.deliveries(), usage: this.store.usage(easternDay(this.now())), recentDecisions: this.store.decisions().filter(item => accounts.includes(item.account)).slice(0, 20) };
   }
-  async command(action: "automation.run" | "automation.schedule" | "review.resolve", input: unknown, requestId: string, actor: string): Promise<AutomationSnapshot> {
+  async command(action: AutomationAction, input: unknown, requestId: string, actor: string): Promise<AutomationSnapshot> {
     if (!/^[A-Za-z0-9._:-]{8,128}$/.test(requestId) || !actor || actor.length > 320) throw new Error("AUTOMATION_INVALID_REQUEST");
     if (this.paused) throw new Error("AUTOMATION_DRAINING");
     const now = this.now().toISOString(), day = easternDay(this.now());
@@ -79,16 +127,36 @@ class DurableAutomationService implements AutomationService {
         const value = scheduleSchema.parse(input);
         if (value.enabled && (!this.provider.configured() || !this.mailConfigured())) throw new Error("AUTOMATION_NOT_CONFIGURED");
         this.store.setSettings({ ...this.store.settings(), ...value });
+      } else if (action === "review.bulkResolve") {
+        const value = bulkSchema.parse(input);
+        if (!this.jobs.acceptHumanReview || !this.jobs.humanReviewState || !this.jobs.applyReviewed) throw new Error("REVIEW_UNAVAILABLE");
+        const accounts = this.jobs.status().configuredAccounts, reviews = this.jobs.reviews(), captured: Record<string, ReviewItem> = {}, capturedPreferences: HumanReviewCommand["capturedPreferences"] = {};
+        const items = value.items.map(item => {
+          const review = reviews.find(review => review.id === item.itemId && review.mode === "apply" && accounts.includes(review.account));
+          const reason = !review ? "REVIEW_NOT_FOUND" : review.revision !== item.revision ? "REVIEW_EVIDENCE_CHANGED" : this.store.humanIntent(item.itemId) ? "REVIEW_ALREADY_QUEUED" : !review.reviewable ? "REVIEW_NOT_ELIGIBLE" : undefined;
+          if (review) captured[item.itemId] = review;
+          if (!reason && value.rememberPreference) { const version = this.jobs.reviewPreferenceVersion?.(item.itemId); if (version) capturedPreferences[item.itemId] = version; }
+          return { ...item, status: reason ? "rejected" as const : "queued" as const, ...(reason ? { code: reason } : {}) };
+        });
+        const queued = items.some(item => item.status === "queued");
+        const run = queued ? this.store.enqueue(`human:${requestId}`, "review", day, now, actor) : undefined;
+        if (run) { run.humanCommandId = requestId; this.store.saveRun(run); }
+        this.store.saveHumanCommand({ requestId, runId: run?.id ?? null, state: queued ? "queued" : "completed", createdAt: now, ...(queued ? {} : { finishedAt: now }), actor, rememberPreference: value.rememberPreference, items, captured, capturedPreferences, receipt: { requestId, runId: run?.id ?? null, items: items.map(({ itemId,status,code }) => ({ itemId,status,code })) } });
+      } else if (action === "review.forgetPreference") {
+        const value = forgetSchema.parse(input);
+        if (!this.jobs.forgetSenderPreference) throw new Error("REVIEW_UNAVAILABLE");
+        this.jobs.forgetSenderPreference(value.preferenceId);
       } else if (action === "review.resolve") {
         const value = resolveSchema.parse(input);
         if (this.activeCount || this.jobs.status().activeRun) throw new Error("AUTOMATION_BUSY");
-        const review = this.snapshot().reviews.find(item => item.id === value.itemId);
+        const review = this.jobs.reviews().find(item => item.id === value.itemId && this.jobs.status().configuredAccounts.includes(item.account) && item.mode === "apply");
         if (!review || !review.reviewable) throw new Error("REVIEW_NOT_ELIGIBLE");
         this.jobs.resolve(value.itemId, value.category);
         this.store.enqueue(`human:${requestId}`, "review", day, now, actor, undefined, [value.itemId]);
       } else throw new Error("AUTOMATION_INVALID_ACTION");
     });
-    return this.snapshot();
+    const human = action === "review.bulkResolve" ? this.store.humanCommand(requestId) : undefined;
+    return { ...this.snapshot(), ...(human ? { reviewReceipt: human.receipt, reviewCommand: this.progress(human) } : {}) };
   }
   afterTriage(run: JobRun): void {
     const settings = this.store.settings();
@@ -155,6 +223,18 @@ class DurableAutomationService implements AutomationService {
       const retryable = /^(CLAUDE_HTTP_(429|5\d\d)|CLAUDE_RUNNER_(UNAVAILABLE|BUSY)|AUTOMATION_UPSTREAM_FAILURE|AUTOMATION_DEADLINE|JOBS_BUSY|JOB_ALREADY_RUNNING)$/.test(errorCode) || run.stage === "brief" && errorCode === "CLAUDE_INVALID_STRUCTURED_OUTPUT";
       run.state = retryable && run.attempts < 3 ? "retry_wait" : "failed";
       if (run.state === "retry_wait") run.nextAttemptAt = new Date(this.now().getTime() + run.attempts * 60_000).toISOString(); else run.finishedAt = this.now().toISOString();
+      if (run.humanCommandId && run.state === "failed") {
+        const command = this.store.humanCommand(run.humanCommandId);
+        if (command) {
+          for (const item of command.items.filter(item => ["queued", "accepted"].includes(item.status))) {
+            this.jobs.holdHumanReview?.(item.itemId, command.requestId);
+            const current = this.jobs.humanReviewState?.(item.itemId,command.requestId);
+            item.status = current?.state === "applied" ? "applied" : current?.state === "needs_review" ? "held" : "failed";
+            item.code = current?.reason ?? errorCode;
+          }
+          command.state = "completed"; command.finishedAt = this.now().toISOString(); this.store.saveHumanCommand(command);
+        }
+      }
       this.logger.warn("automation run stopped", { runId: run.id, errorCode, ...(error instanceof StructuredOutputError ? { issues: error.issues } : {}) });
     } finally { if (this.store.fenced(run)) { delete run.claim; this.store.saveRun(run); } }
   }
@@ -167,32 +247,35 @@ class DurableAutomationService implements AutomationService {
     this.store.settle(day, reserved, output, result.inputTokens, result.outputTokens); return result;
   }
   private async review(run: StoredRun, signal: AbortSignal): Promise<void> {
+    if (run.humanCommandId) { await this.humanReview(run, signal); return; }
     if (!this.jobs.reviewContext || !this.jobs.acceptAgentReview || !this.jobs.applyReviewed) throw new Error("REVIEW_SERVICE_UNAVAILABLE");
     const manual = !!run.approvedIds?.length;
-    const approved = new Set([...(run.approvedIds ?? []), ...(this.jobs.readyReviewIds?.() ?? []), ...this.store.accepted().map(record => record.id)]);
+    const approved = new Set([...(run.approvedIds ?? []), ...(this.jobs.readyReviewIds?.() ?? []), ...this.store.accepted().map(record => record.id)].filter(id => !this.store.humanIntent(id)));
     if (!manual) {
       if (!this.provider.configured()) throw new Error("CLAUDE_KEY_MISSING");
       const accounts = this.jobs.status().configuredAccounts;
-      const candidates = this.jobs.reviews().filter(item => item.mode === "apply" && accounts.includes(item.account) && item.reviewable && !this.store.reviewRecord(this.store.reviewKey(item.id, item.revision!, AUTOMATION_POLICY))).slice(0, REVIEW_BATCH_SIZE);
+      const candidates = this.jobs.reviews().filter(item => item.mode === "apply" && accounts.includes(item.account) && item.reviewable && !this.store.humanIntent(item.id) && !this.store.reviewRecord(this.store.reviewKey(item.id, item.revision!, AUTOMATION_POLICY))).slice(0, REVIEW_BATCH_SIZE);
       for (const item of candidates) {
         signal.throwIfAborted();
-        const key = this.store.reviewKey(item.id, item.revision!, AUTOMATION_POLICY); if (this.store.reviewRecord(key)) continue;
+        const key = this.store.reviewKey(item.id, item.revision!, AUTOMATION_POLICY); if (this.store.reviewRecord(key) || this.store.humanIntent(item.id)) continue;
         try {
           const usage = this.store.usage(easternDay(this.now()));
           const reserveBrief = run.actor !== "schedule:review-backlog" && !this.store.briefing(easternDay(this.now()));
           if (!this.reviewCapacity(usage, reserveBrief)) { run.held++; break; }
           const context = await this.jobs.reviewContext(item.id, signal);
           const result = await this.model(run, context, REVIEW_MAX_TOKENS, () => this.provider.review(context, signal));
+          if (this.store.humanIntent(item.id)) continue;
           const proposal = reviewSchema.parse(result.value);
           if (proposal.itemId !== context.itemId || proposal.revision !== context.revision || proposal.policyVersion !== context.policyVersion) throw new Error("REVIEW_IDENTITY_MISMATCH");
           let accepted = false;
           if (proposal.clear && !proposal.needsMoreContext && proposal.category && proposal.confidence >= 0.95) {
-            await this.jobs.acceptAgentReview(proposal, result.model, signal); accepted = true; approved.add(item.id);
+            await this.jobs.acceptAgentReview({ ...proposal, preferenceEvidence: context.preferenceEvidence }, result.model, signal, () => this.assertClaim(run)); accepted = true; approved.add(item.id);
           }
           this.store.saveReview(key, { id: item.id, account: context.account, category: proposal.category, revision: context.revision, policyVersion: AUTOMATION_POLICY, state: accepted ? "accepted" : "held", model: result.model, reason: safeText(proposal.reason), createdAt: this.now().toISOString() });
           run.reviewed++; if (!accepted) run.held++; this.store.saveRun(run);
         } catch (error) {
           const errorCode = code(error);
+          if (errorCode === "REVIEW_HUMAN_PENDING") continue;
           if (errorCode === "AUTOMATION_STALE_CLAIM" || errorCode.startsWith("CLAUDE_") || errorCode === "DAILY_MODEL_BUDGET_EXHAUSTED" || signal.aborted || errorCode === "AUTOMATION_UPSTREAM_FAILURE") throw error;
           this.store.saveReview(key, { id: item.id, account: item.account, category: null, revision: item.revision!, policyVersion: AUTOMATION_POLICY, state: "held", model: "policy", reason: errorCode, createdAt: this.now().toISOString() });
           run.held++; run.failed++; this.store.saveRun(run);
@@ -200,7 +283,9 @@ class DurableAutomationService implements AutomationService {
       }
     }
     if (approved.size) {
-      this.assertClaim(run); const result = await this.jobs.applyReviewed([...approved].slice(0, 100), signal);
+      this.assertClaim(run); const ids = [...approved].filter(id => !this.store.humanIntent(id)).slice(0, 100);
+      if (!ids.length) return;
+      const result = await this.jobs.applyReviewed(ids, signal);
       run.applied += result.accounts.reduce((sum, account) => sum + account.processed, 0); run.failed += result.accounts.reduce((sum, account) => sum + account.failed, 0);
       for (const record of this.store.accepted().filter(item => approved.has(item.id))) {
         const state = this.jobs.reviewedWorkState?.(record.id);
@@ -209,6 +294,44 @@ class DurableAutomationService implements AutomationService {
       }
       delete run.approvedIds; this.store.saveRun(run);
     }
+  }
+  private async humanReview(run: StoredRun, signal: AbortSignal): Promise<void> {
+    if (!this.jobs.acceptHumanReview || !this.jobs.humanReviewState || !this.jobs.applyReviewed) throw new Error("REVIEW_UNAVAILABLE");
+    const command = this.store.humanCommand(run.humanCommandId!);
+    if (!command || command.runId !== run.id) throw new Error("REVIEW_COMMAND_MISSING");
+    this.assertClaim(run); command.state = "running"; this.store.saveHumanCommand(command);
+    for (const item of command.items) {
+      signal.throwIfAborted(); this.assertClaim(run);
+      if (item.status !== "queued") continue;
+      try {
+        if (this.store.humanIntent(item.itemId) !== command.requestId) throw new Error("REVIEW_ALREADY_QUEUED");
+        const prior = this.jobs.humanReviewState(item.itemId,command.requestId);
+        if (!prior) await this.jobs.acceptHumanReview({ ...item, requestId: command.requestId, actor: command.actor, preferenceEvidence: command.capturedPreferences[item.itemId] }, signal, () => this.assertClaim(run));
+        this.assertClaim(run); item.status = "accepted"; delete item.code; this.store.saveHumanCommand(command);
+      } catch (error) {
+        const reason = code(error);
+        if (signal.aborted || reason === "AUTOMATION_STALE_CLAIM" || !reason.startsWith("REVIEW_")) throw error;
+        item.status = ["REVIEW_EVIDENCE_CHANGED", "REVIEW_NOT_ELIGIBLE", "REVIEW_NOT_RESOLVABLE", "REVIEW_NOT_FOUND"].includes(reason) ? "stale" : "held";
+        item.code = reason; this.store.saveHumanCommand(command);
+      }
+    }
+    const pending = command.items.filter(item => item.status === "accepted" && this.jobs.humanReviewState!(item.itemId,command.requestId)?.state !== "applied");
+    if (pending.length) { this.assertClaim(run); await this.jobs.applyReviewed(pending.map(item => item.itemId), signal); signal.throwIfAborted(); this.assertClaim(run); }
+    let retry = false;
+    for (const item of command.items.filter(item => item.status === "accepted")) {
+      const state = this.jobs.humanReviewState(item.itemId,command.requestId);
+      if (state?.state === "applied") { item.status = "applied"; if (command.rememberPreference) item.preferenceSaved = this.jobs.rememberHumanPreference?.(item.itemId,command.requestId) ?? false; }
+      else if (state?.state === "needs_review") { item.status = "held"; item.code = state.reason ?? "REVIEW_NEEDS_RECONCILIATION"; }
+      else if (!state || state.state === "superseded") { item.status = "stale"; item.code = "REVIEW_EVIDENCE_CHANGED"; }
+      else retry = true;
+    }
+    run.reviewed = command.items.filter(item => !["queued", "rejected"].includes(item.status)).length;
+    run.applied = command.items.filter(item => item.status === "applied").length;
+    run.held = command.items.filter(item => ["held", "stale", "rejected"].includes(item.status)).length;
+    run.failed = command.items.filter(item => item.status === "failed").length;
+    this.store.saveRun(run); this.store.saveHumanCommand(command);
+    if (retry) throw new Error("AUTOMATION_UPSTREAM_FAILURE");
+    command.state = "completed"; command.finishedAt = this.now().toISOString(); this.store.saveHumanCommand(command);
   }
   private sources(run: StoredRun): BriefInput {
     const registry = this.track.loadRegistry(); const sources: BriefSource[] = [];

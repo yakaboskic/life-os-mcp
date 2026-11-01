@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { PORTAL_HTML } from "../src/web/page.js";
 import { PWA_ASSETS } from "../src/web/pwa.js";
+import { readRoute } from "../deploy/web-gateway/read-routes.mjs";
 import { PUBLIC_PAGES, PUBLIC_PAGE_LINKS } from "./public-pages.js";
 import { FLOW_COOKIE, SESSION_COOKIE, clearFlowCookie, clearSessionCookie, cookies, flowCookie, loginUrl, newLoginFlow, readLoginFlow, readSession, readWebConfig, sessionCookie, validateIdentity, verifyGoogleIdToken, type Identity, type WebConfig } from "./auth.js";
 
 export interface WebDependencies { env?: NodeJS.ProcessEnv; fetch?: typeof fetch; now?: () => number; verifyIdToken?: (token: string, audience: string) => Promise<Identity> }
-const READ_PATHS = new Set(["/api/data", "/api/triage", "/api/jobs", "/api/automation"]);
+const READ_PATHS = new Set(["/api/data", "/api/triage", "/api/jobs", "/api/automation", "/api/reviews", "/api/review"]);
 const API_PATHS = new Set([...READ_PATHS, "/api/actions"]);
 const RELAY_STATUSES = new Set([200, 201, 202, 400, 401, 403, 404, 409, 413, 415, 429, 503]);
 const MAX_ACTION_BYTES = 64 * 1024;
@@ -115,7 +116,8 @@ export function createWebHandler(dependencies: WebDependencies = {}): (request: 
     const isAction = url.pathname === "/api/actions";
     if ((isAction && request.method !== "POST") || (!isAction && request.method !== "GET")) return json({ error: "Method not allowed" }, 405);
     if (url.pathname === "/" && !url.search) return response(PRIVATE_HTML);
-    if (API_PATHS.has(url.pathname) && !url.search) {
+    const read = readRoute(url.pathname + url.search);
+    if (isAction && !url.search || read) {
       const site = request.headers.get("sec-fetch-site"), origin = request.headers.get("origin");
       if (isAction ? origin !== config.publicUrl || site !== "same-origin" : site === "cross-site" || (origin !== null && origin !== config.publicUrl)) return json({ error: "Invalid request origin" }, 403);
       let body: string | undefined;
@@ -127,7 +129,7 @@ export function createWebHandler(dependencies: WebDependencies = {}): (request: 
         // Construct every upstream header; browser-supplied actors and credentials never cross this boundary.
         const headers: Record<string, string> = { authorization: `Bearer ${config.gatewayToken}`, accept: "application/json" };
         if (isAction) { headers["content-type"] = "application/json"; headers["x-life-os-actor"] = session.email; }
-        const upstream = await requestUpstream(`${config.gatewayUrl}${url.pathname}`, { method: isAction ? "POST" : "GET", headers, body, cache: "no-store", redirect: "error", signal: AbortSignal.timeout(20_000) });
+        const upstream = await requestUpstream(`${config.gatewayUrl}${isAction ? '/api/actions' : read}`, { method: isAction ? "POST" : "GET", headers, body, cache: "no-store", redirect: "error", signal: AbortSignal.timeout(20_000) });
         if (!RELAY_STATUSES.has(upstream.status)) { await upstream.body?.cancel(); return json({ error: "LifeOS is temporarily unavailable" }, 502); }
         return json(await limitedJson(upstream), upstream.status);
       } catch { return json({ error: "LifeOS is temporarily unavailable" }, 502); }

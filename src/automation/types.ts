@@ -1,4 +1,4 @@
-import type { JobRun, ReviewItem, AgentReviewContext, AgentReviewProposal } from "../jobs/types.js";
+import type { JobRun, ReviewItem, AgentReviewContext, AgentReviewProposal, Category, SenderPreference, ReviewInspection } from "../jobs/types.js";
 
 export const AUTOMATION_POLICY = "lifeos-review-v1";
 export type AutomationKind = "review" | "brief" | "daily";
@@ -22,7 +22,19 @@ export interface AutomationSnapshot {
   usage: { day: string; calls: number; inputTokens: number; outputTokens: number; maxCalls: number; maxInputTokens: number; maxOutputTokens: number; reviewCalls?: number; maxReviewCalls?: number };
   backlog?: { total: number; awaitingAgent: number; needsDecision: number; needsContext: number };
   recentDecisions?: AutomationReviewDecision[];
+  reviewReceipt?: ReviewReceipt;
+  reviewCommand?: ReviewCommandProgress;
+  reviewCommands?: ReviewCommandProgress[];
 }
+export type ReviewBucket = "awaitingAgent" | "needsDecision" | "needsContext" | "queued";
+export interface ReviewQueueQuery { bucket?: ReviewBucket | "all"; search?: string; account?: string; category?: Category; limit?: number; cursor?: string }
+export interface ReviewQueueItem extends ReviewItem { bucket: ReviewBucket; queuedCommandId?: string }
+export interface ReviewReceipt { requestId: string; runId: string | null; items: Array<{ itemId: string; status: "queued" | "rejected"; code?: string }> }
+export interface ReviewCommandItem { itemId: string; revision: string; category: Category; status: "queued" | "accepted" | "applied" | "stale" | "held" | "failed" | "rejected"; code?: string; preferenceSaved?: boolean }
+export interface ReviewCommandProgress { requestId: string; runId: string | null; state: "queued" | "running" | "completed"; createdAt: string; finishedAt?: string; items: ReviewCommandItem[] }
+export interface ReviewQueuePage { items: ReviewQueueItem[]; total: number; limit: number; nextCursor: string | null; counts: { total: number; awaitingAgent: number; needsDecision: number; needsContext: number; queued: number }; accounts: string[]; preferences: SenderPreference[]; pendingCommands: ReviewCommandProgress[] }
+export type ReviewDetail = Omit<ReviewInspection, "item"> & { item: ReviewQueueItem };
+export type AutomationAction = "automation.run" | "automation.schedule" | "review.resolve" | "review.bulkResolve" | "review.forgetPreference";
 export interface AutomationReviewDecision { id: string; account: string; category: string | null; state: "held" | "accepted" | "applied"; model: string; reason: string; createdAt: string }
 export interface BriefSource { id: string; kind: "task" | "project" | "product" | "triage" | "review" | "focus" | "time"; title: string; details: string }
 export interface BriefInput { day: string; now: string; sources: BriefSource[]; coverage: string[] }
@@ -40,6 +52,8 @@ export interface BriefDeliveryGateway {
 }
 export interface AutomationService {
   snapshot(): AutomationSnapshot;
-  command(action: "automation.run" | "automation.schedule" | "review.resolve", input: unknown, requestId: string, actor: string): Promise<AutomationSnapshot>;
+  command(action: AutomationAction, input: unknown, requestId: string, actor: string): Promise<AutomationSnapshot>;
+  reviewQueue?(query: ReviewQueueQuery): ReviewQueuePage;
+  reviewDetail?(itemId: string, signal?: AbortSignal): Promise<ReviewDetail>;
   tick(): Promise<void>; afterTriage(run: JobRun): void; drain(): Promise<void>; resume(): void; readonly activeCount: number;
 }

@@ -1,8 +1,8 @@
 import { createServer } from 'node:http';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
+import { readRoute } from './read-routes.mjs';
 
-const allowed = new Set(['/api/data', '/api/triage', '/api/jobs', '/api/automation']);
 const relayStatuses = new Set([200, 201, 202, 400, 401, 403, 404, 409, 413, 415, 429, 503]);
 const digest = value => createHash('sha256').update(value).digest();
 const maximumResponseBytes = 5 * 1024 * 1024;
@@ -49,7 +49,8 @@ export function createGateway({ token, upstream, release = 'development', fetchI
     const authorization = req.headers.authorization ?? '';
     if (req.headers.origin || !authorization.startsWith('Bearer ') || !timingSafeEqual(expected, digest(authorization.slice(7)))) { respond(401, { error: 'Unauthorized' }); return; }
     const isAction = req.method === 'POST' && req.url === '/api/actions';
-    if (!isAction && (req.method !== 'GET' || !allowed.has(req.url ?? '') || req.headers['transfer-encoding'] || Number(req.headers['content-length'] ?? 0) !== 0)) { respond(404, { error: 'Not found' }); return; }
+    const read = readRoute(req.url ?? '');
+    if (!isAction && (req.method !== 'GET' || !read || req.headers['transfer-encoding'] || Number(req.headers['content-length'] ?? 0) !== 0)) { respond(404, { error: 'Not found' }); return; }
     const actor = req.headers['x-life-os-actor'];
     if (isAction && !validActor(actor)) { respond(400, { error: 'Invalid action actor' }); return; }
     let action;
@@ -60,7 +61,7 @@ export function createGateway({ token, upstream, release = 'development', fetchI
     try {
       const headers = { authorization: 'Bearer ' + token, accept: 'application/json' };
       if (isAction) { headers['content-type'] = 'application/json'; headers['x-life-os-actor'] = actor; }
-      const response = await fetchImpl(new URL(req.url, origin), {
+      const response = await fetchImpl(new URL(isAction ? '/api/actions' : read, origin), {
         method: isAction ? 'POST' : 'GET', headers, body: action,
         redirect: 'error', signal: AbortSignal.timeout(10_000),
       });

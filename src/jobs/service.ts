@@ -10,7 +10,7 @@ import { TrackStore } from "../toolsets/track/store.js";
 import { GmailJobGateway } from "./gmail.js";
 import { CATEGORY_CRITERIA, JevClassifier } from "./jev.js";
 import { JobStore, type WorkItem } from "./store.js";
-import { ACTIVE_CATEGORIES, CATEGORIES, RUBRIC_VERSION, TIME_ZONE, type AgentReviewContext, type AgentReviewProposal, type AccountResult, type Category, type Classifier, type JobRun, type JobService, type JobStatus, type MailGateway, type MailMessage, type MailThread, type MutationPlan, type ReviewItem, type StartJobInput } from "./types.js";
+import { ACTIVE_CATEGORIES, CATEGORIES, RUBRIC_VERSION, TIME_ZONE, type AgentReviewContext, type AgentReviewProposal, type AccountResult, type Category, type Classifier, type JobRun, type JobService, type JobStatus, type MailGateway, type MailMessage, type MailThread, type MutationPlan, type ReviewItem, type StartJobInput, type ReviewInspection, type HumanReviewInput } from "./types.js";
 
 export type { JobService, JobRun, JobStatus, ReviewItem, StartJobInput } from "./types.js";
 export interface JobDependencies { gateway?: MailGateway; classifier?: Classifier; now?: () => Date; deadlineMs?: number }
@@ -37,6 +37,11 @@ export function nextRunAt(now: Date): string {
 function hash(value: unknown): string { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
 export function normalizeSubject(subject: string): string { return subject.replace(/^(?:(?:re|fw|fwd)\s*:\s*)+/gi, "").replace(/\s+/g, " ").trim().toLowerCase(); }
 function senderAddress(from: string): string { return (from.match(/<([^<>]+)>/)?.[1] ?? from).trim().toLowerCase(); }
+function exactSender(from: string): string | undefined {
+  const match = from.trim().match(/^(?:[^<>,;\r\n]*<([^<>]+)>|([^<>,;\s]+))$/);
+  const value = (match?.[1] ?? match?.[2] ?? "").trim().toLowerCase();
+  return /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(value) ? value : undefined;
+}
 function eligible(thread: MailThread): MailMessage[] { return thread.messages.filter((message) => !message.labels.includes("DRAFT")); }
 function incoming(message: MailMessage): boolean { return !message.labels.includes("SENT") && !message.labels.includes("DRAFT"); }
 function newer(a: Pick<MailMessage, "id" | "internalDate">, b: Pick<MailMessage, "id" | "internalDate">): boolean { return a.internalDate > b.internalDate || a.internalDate === b.internalDate && a.id > b.id; }
@@ -92,6 +97,60 @@ class GmailTriageService implements JobService {
     const thread = await this.gateway.thread(account, id, signal);
     return { ...thread, messages: thread.messages.filter(message => !this.store.isOwnedMessage(account, message.id, message.rfcMessageId)) };
   }
+  private preferenceContext(account: string, thread: MailThread, triggerIds: string[]) {
+    const sender = exactSender(thread.messages.filter(message => triggerIds.includes(message.id) && incoming(message)).at(-1)?.from ?? "");
+    if (!sender) return {};
+    const value = this.store.preference(account, sender);
+    return { senderPreference: value.preference, preferenceEvidence: { sender, version: value.version } };
+  }
+  async inspectReview(id: string, signal: AbortSignal): Promise<ReviewInspection> {
+    const item = this.store.reviewItem(id), work = this.store.work(id);
+    if (!item || !work || work.mode !== "apply" || !this.gateway.accounts().includes(work.account)) throw new Error("REVIEW_NOT_FOUND");
+    await this.gateway.verify(work.account, signal);
+    const labels = await this.gateway.labels(work.account, false, signal), thread = await this.readThread(work.account, work.threadId, signal);
+    if (!this.store.reviewItem(id)) throw new Error("REVIEW_NOT_FOUND");
+    const currentRevision = revision(thread), changed = currentRevision !== work.revision || work.labelRevision !== hash(thread.messages.map(message => [message.id, relevantLabels(message.labels, labels)]));
+    let remaining = 60_000, truncated = thread.messages.length > 50;
+    const messages = thread.messages.slice(-50).reverse().map(message => {
+      const body = message.body.slice(0, remaining); remaining -= body.length;
+      const clipped = message.truncated || body.length < message.body.length; truncated ||= clipped;
+      return { ...message, from: message.from.slice(0, 2000), to: message.to.slice(0, 2000), subject: message.subject.slice(0, 2000), body, truncated: clipped };
+    }).reverse();
+    return { item, messages, truncated, capturedRevision: work.revision, currentRevision, changed, ...(changed ? { blockedReason: "REVIEW_EVIDENCE_CHANGED" } : !item.reviewable ? { blockedReason: item.reason } : {}) };
+  }
+  async acceptHumanReview(input: HumanReviewInput, signal: AbortSignal, guard?: () => void): Promise<ReviewItem> {
+    if (!CATEGORIES.includes(input.category) || !input.actor || input.actor.length > 320 || !/^[A-Za-z0-9._:-]{8,128}$/.test(input.requestId)) throw new Error("REVIEW_INVALID_REQUEST");
+    const context = await this.reviewContext(input.itemId, signal);
+    if (input.revision !== context.revision) throw new Error("REVIEW_EVIDENCE_CHANGED");
+    if (this.active || this.paused) throw new Error("JOBS_BUSY");
+    signal.throwIfAborted(); guard?.();
+    return this.store.acceptHuman(input.itemId, { category: input.category, confidence: 1, model: "human", probabilities: {} as Record<Category, number>, reviewed: true,
+      humanReview: { requestId: input.requestId, actor: input.actor, revision: input.revision, sender: context.preferenceEvidence?.sender,
+        preferenceVersion: input.preferenceEvidence?.sender === context.preferenceEvidence?.sender ? input.preferenceEvidence?.version : undefined } });
+  }
+  humanReviewState(id: string, requestId: string) {
+    const work = this.store.work(id), decision = work?.decision;
+    if (!work || !decision?.humanReview || decision.humanReview.requestId !== requestId || !this.gateway.accounts().includes(work.account)) return undefined;
+    return { state: work.state, reason: work.reason, account: work.account, category: decision.category, revision: work.revision, sender: decision.humanReview.sender, preferenceVersion: decision.humanReview.preferenceVersion };
+  }
+  holdHumanReview(id: string, requestId: string): void {
+    const state = this.humanReviewState(id, requestId), work = this.store.work(id);
+    if (!state || !work || ["applied", "needs_review", "superseded"].includes(work.state)) return;
+    this.store.review(work, this.store.hasAttempt(id) ? "UNCERTAIN_GMAIL_MUTATION" : "HUMAN_REVIEW_APPLY_FAILED");
+  }
+  rememberHumanPreference(id: string, requestId: string): boolean {
+    const state = this.humanReviewState(id, requestId);
+    return !!state && state.state === "applied" && !!state.sender && state.preferenceVersion !== undefined && this.store.rememberPreference(state.account, state.sender, state.category, state.preferenceVersion);
+  }
+  senderPreferences() { return this.store.preferences(this.gateway.accounts()); }
+  forgetSenderPreference(id: string): void { this.store.forgetPreference(id, this.gateway.accounts()); }
+  reviewPreferenceVersion(id: string) {
+    const work = this.store.work(id);
+    if (!work || work.mode !== "apply" || !this.gateway.accounts().includes(work.account)) return undefined;
+    // This is only a concurrency version. Remembering still requires a freshly read,
+    // strictly single-mailbox From header matching this captured address.
+    return { sender: work.sender, version: this.store.preference(work.account, work.sender).version };
+  }
   async reviewContext(id: string, signal: AbortSignal): Promise<AgentReviewContext> {
     if (this.active || this.paused) throw new Error("JOBS_BUSY");
     const work = this.store.work(id); const review = this.reviews().find(item => item.id === id);
@@ -102,10 +161,11 @@ class GmailTriageService implements JobService {
     if (revision(thread) !== work.revision || work.labelRevision !== hash(thread.messages.map(message => [message.id, relevantLabels(message.labels, labels)]))) throw new Error("REVIEW_EVIDENCE_CHANGED");
     const messages = eligible(thread);
     if (!messages.length || messages.length > 50 || messages.some(message => message.truncated) || messages.reduce((sum, message) => sum + message.body.length, 0) > 60_000 || messages.filter(incoming).some(message => !message.body.trim())) throw new Error("REVIEW_INCOMPLETE_CONTEXT");
-    return { itemId: id, revision: work.revision, policyVersion: "lifeos-review-v1", account: work.account, now: this.now().toISOString(), thread, triggerIds: work.triggerIds, proposedCategory: work.decision?.category };
+    return { itemId: id, revision: work.revision, policyVersion: "lifeos-review-v1", account: work.account, now: this.now().toISOString(), thread, triggerIds: work.triggerIds, proposedCategory: work.decision?.category, ...this.preferenceContext(work.account, thread, work.triggerIds) };
   }
-  async acceptAgentReview(proposal: AgentReviewProposal, model: string, signal: AbortSignal): Promise<ReviewItem> {
+  async acceptAgentReview(proposal: AgentReviewProposal, model: string, signal: AbortSignal, guard?: () => void): Promise<ReviewItem> {
     const context = await this.reviewContext(proposal.itemId, signal);
+    if (proposal.preferenceEvidence && JSON.stringify(proposal.preferenceEvidence) !== JSON.stringify(context.preferenceEvidence)) throw new Error("REVIEW_PREFERENCE_CHANGED");
     if (proposal.revision !== context.revision || proposal.policyVersion !== context.policyVersion || !proposal.clear || proposal.needsMoreContext || !Number.isFinite(proposal.confidence) || proposal.confidence < 0.95 || proposal.confidence > 1 || !proposal.category || !CATEGORIES.includes(proposal.category)) throw new Error("REVIEW_NOT_CLEAR");
     if (!proposal.reason.trim() || proposal.reason.length > 600 || proposal.evidence.length < 1 || proposal.evidence.length > 3 || !model.startsWith("claude-")) throw new Error("REVIEW_INVALID_EVIDENCE");
     const normalize = (value: string) => value.replace(/\s+/g, " ").trim();
@@ -114,13 +174,14 @@ class GmailTriageService implements JobService {
       return !message || evidence.quote.length < 12 || evidence.quote.length > 240 || !normalize(message.body).includes(normalize(evidence.quote));
     })) throw new Error("REVIEW_INVALID_EVIDENCE");
     if (this.active || this.paused) throw new Error("JOBS_BUSY");
-    return this.store.acceptAgent(proposal.itemId, { category: proposal.category, confidence: proposal.confidence, probabilities: {} as Record<Category, number>, model, agentReview: { policyVersion: proposal.policyVersion, revision: proposal.revision, reason: proposal.reason, evidence: proposal.evidence, actor: "claude" } });
+    signal.throwIfAborted(); guard?.();
+    return this.store.acceptAgent(proposal.itemId, { category: proposal.category, confidence: proposal.confidence, probabilities: {} as Record<Category, number>, model, preferenceEvidence: context.preferenceEvidence, agentReview: { policyVersion: proposal.policyVersion, revision: proposal.revision, reason: proposal.reason, evidence: proposal.evidence, actor: "claude" } });
   }
   applyReviewed(ids: string[], signal?: AbortSignal): Promise<JobRun> {
     if (!ids.length || ids.length > 100 || ids.some(id => typeof id !== "string")) return Promise.reject(new Error("INVALID_REVIEW_IDS"));
     return this.start({ mode: "apply", reviewedIds: [...new Set(ids)], signal });
   }
-  readyReviewIds(): string[] { return this.gateway.accounts().flatMap(account => this.store.works(account, "apply").filter(work => work.kind === "classify" && (work.decision?.reviewed || work.decision?.agentReview) && ["classified", "applying"].includes(work.state)).map(work => work.id)); }
+  readyReviewIds(): string[] { return this.gateway.accounts().flatMap(account => this.store.works(account, "apply").filter(work => work.kind === "classify" && !work.decision?.humanReview && (work.decision?.reviewed || work.decision?.agentReview) && ["classified", "applying"].includes(work.state)).map(work => work.id)); }
   reviewedWorkState(id: string): string | undefined { return this.store.work(id)?.state; }
   status(): JobStatus {
     const history = this.store.history(1000);
@@ -200,7 +261,7 @@ class GmailTriageService implements JobService {
   private async account(run: JobRun, result: AccountResult, labels: Record<string, string>, signal: AbortSignal): Promise<void> {
     if (run.mode === "apply") await this.backfillLegacyLinks(result.account, signal);
     // Finish durable decisions first. This includes local finalization after a lost write response.
-    const pending = this.store.works(result.account, run.mode).filter((item) => !TERMINAL_WORK.has(item.state));
+    const pending = this.store.works(result.account, run.mode).filter((item) => !TERMINAL_WORK.has(item.state) && !item.decision?.humanReview);
     const resumable = [...pending.filter((item) => ["applying", "classified"].includes(item.state)), ...pending.filter((item) => ["retryable", "discovered"].includes(item.state)).slice(0, 10)];
     for (const work of resumable) {
       signal.throwIfAborted();
@@ -255,9 +316,12 @@ class GmailTriageService implements JobService {
           if (messages.length > 50 || messages.some((message) => message.truncated) || messages.reduce((sum, message) => sum + message.body.length, 0) > 60_000 || messages.filter(incoming).some((message) => !message.body.trim())) {
             this.store.review(work, "INSUFFICIENT_OR_TRUNCATED_CONTEXT"); result.held++; return;
           }
-          work.decision = await this.classifier.classify({ account: work.account, now: this.now().toISOString(), timeZone: TIME_ZONE, thread }, signal);
+          const preference = this.preferenceContext(work.account, thread, work.triggerIds);
+          work.decision = await this.classifier.classify({ account: work.account, now: this.now().toISOString(), timeZone: TIME_ZONE, thread, senderPreference: preference.senderPreference }, signal);
+          work.decision.preferenceEvidence = preference.preferenceEvidence;
           work.state = "classified"; this.store.saveWork(work);
         }
+        if (work.decision.preferenceEvidence && this.store.preference(work.account, work.decision.preferenceEvidence.sender).version !== work.decision.preferenceEvidence.version) { this.store.review(work, "REVIEW_PREFERENCE_CHANGED"); result.held++; return; }
         if (work.decision.confidence < 0.9) { this.store.review(work, "LOW_CONFIDENCE"); result.held++; return; }
         if (work.mode === "dry-run") { work.state = "applied"; this.store.saveWork(work); result.processed++; return; }
         // Persist relevant preconditions before re-fetching. Unrelated labels and UNREAD do not matter.
@@ -269,6 +333,10 @@ class GmailTriageService implements JobService {
       if (!this.unchanged(work.plan, thread, labels) || revision(thread) !== work.revision) {
         this.store.review(work, "MAIL_CHANGED_BEFORE_APPLY"); result.held++; return;
       }
+      // Forget/replacement may arrive while the final Gmail read is in flight.
+      // Check synchronously again immediately before the write-ahead mutation record.
+      const preference = work.decision?.preferenceEvidence;
+      if (preference && this.store.preference(work.account, preference.sender).version !== preference.version) { this.store.review(work, "REVIEW_PREFERENCE_CHANGED"); result.held++; return; }
       const attempt = this.store.attempt(work);
       try {
         signal.throwIfAborted();

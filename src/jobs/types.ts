@@ -19,8 +19,11 @@ export interface Decision {
   category: Category; confidence: number; probabilities: Record<Category, number>;
   model: string; inputTokens?: number; reviewed?: boolean;
   agentReview?: { policyVersion: string; revision: string; reason: string; evidence: Array<{ messageId: string; quote: string }>; actor: "claude" };
+  humanReview?: { requestId: string; actor: string; revision: string; sender?: string; preferenceVersion?: number };
+  preferenceEvidence?: { sender: string; version: number };
 }
-export interface ClassificationInput { account: string; now: string; timeZone: string; thread: MailThread }
+export interface SenderPreference { id: string; account: string; sender: string; category: Category; createdAt: string; updatedAt: string; version: number }
+export interface ClassificationInput { account: string; now: string; timeZone: string; thread: MailThread; senderPreference?: SenderPreference }
 export interface Classifier { classify(input: ClassificationInput, signal: AbortSignal): Promise<Decision> }
 export interface MailGateway {
   accounts(): string[];
@@ -43,8 +46,11 @@ export interface ReviewItem {
   mode?: RunMode; revision?: string; reviewable?: boolean;
   agentReview?: { category: Category | null; reason: string; model: string; createdAt: string };
 }
-export interface AgentReviewContext { itemId: string; revision: string; policyVersion: string; account: string; now: string; thread: MailThread; triggerIds: string[]; proposedCategory?: Category }
-export interface AgentReviewProposal { itemId: string; revision: string; policyVersion: string; category: Category | null; clear: boolean; confidence: number; needsMoreContext: boolean; reason: string; evidence: Array<{ messageId: string; quote: string }> }
+export interface AgentReviewContext { itemId: string; revision: string; policyVersion: string; account: string; now: string; thread: MailThread; triggerIds: string[]; proposedCategory?: Category; senderPreference?: SenderPreference; preferenceEvidence?: { sender: string; version: number } }
+export interface AgentReviewProposal { itemId: string; revision: string; policyVersion: string; category: Category | null; clear: boolean; confidence: number; needsMoreContext: boolean; reason: string; evidence: Array<{ messageId: string; quote: string }>; preferenceEvidence?: { sender: string; version: number } }
+export interface ReviewInspection { item: ReviewItem; messages: MailMessage[]; truncated: boolean; capturedRevision: string; currentRevision: string; changed: boolean; blockedReason?: string }
+export interface HumanReviewInput { itemId: string; revision: string; category: Category; requestId: string; actor: string; preferenceEvidence?: { sender: string; version: number } }
+export interface HumanReviewState { state: string; reason?: string; account: string; category: Category; revision: string; sender?: string; preferenceVersion?: number }
 export interface JobStatus {
   activeRun: JobRun | null; lastRun: JobRun | null; lastSuccessfulRun: JobRun | null;
   nextRunAt: string; schedule: string; timeZone: string; accounts: AccountResult[];
@@ -56,8 +62,16 @@ export interface JobService {
   reviews(): ReviewItem[]; resolve(itemId: string, category: Category): ReviewItem;
   drain(): Promise<void>; resume(): void;
   reviewContext?(itemId: string, signal: AbortSignal): Promise<AgentReviewContext>;
-  acceptAgentReview?(proposal: AgentReviewProposal, model: string, signal: AbortSignal): Promise<ReviewItem>;
+  acceptAgentReview?(proposal: AgentReviewProposal, model: string, signal: AbortSignal, guard?: () => void): Promise<ReviewItem>;
   applyReviewed?(ids: string[], signal?: AbortSignal): Promise<JobRun>;
   readyReviewIds?(): string[];
   reviewedWorkState?(id: string): string | undefined;
+  inspectReview?(itemId: string, signal: AbortSignal): Promise<ReviewInspection>;
+  acceptHumanReview?(input: HumanReviewInput, signal: AbortSignal, guard?: () => void): Promise<ReviewItem>;
+  humanReviewState?(itemId: string, requestId: string): HumanReviewState | undefined;
+  holdHumanReview?(itemId: string, requestId: string): void;
+  rememberHumanPreference?(itemId: string, requestId: string): boolean;
+  senderPreferences?(): SenderPreference[];
+  forgetSenderPreference?(id: string): void;
+  reviewPreferenceVersion?(itemId: string): { sender: string; version: number } | undefined;
 }

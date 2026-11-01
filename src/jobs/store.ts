@@ -1,7 +1,7 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { transaction } from "../state/database.js";
-import type { Category, Decision, JobRun, MutationPlan, ReviewItem, RunMode } from "./types.js";
+import type { Category, Decision, JobRun, MutationPlan, ReviewItem, RunMode, SenderPreference } from "./types.js";
 
 export type WorkState = "discovered" | "classified" | "applying" | "applied" | "retryable" | "needs_review" | "superseded";
 export interface WorkItem {
@@ -24,6 +24,7 @@ export class JobStore {
       CREATE TABLE IF NOT EXISTS triage_task_links (account TEXT NOT NULL, thread_id TEXT NOT NULL, task_id TEXT NOT NULL, active INTEGER NOT NULL, json TEXT NOT NULL, PRIMARY KEY(account,thread_id));
       CREATE TABLE IF NOT EXISTS triage_mutation_attempts (id TEXT PRIMARY KEY, work_id TEXT NOT NULL REFERENCES triage_work(id), started_at TEXT NOT NULL, outcome TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS owned_generated_messages (account TEXT NOT NULL, rfc_message_id TEXT NOT NULL, gmail_message_id TEXT, PRIMARY KEY(account,rfc_message_id));
+      CREATE TABLE IF NOT EXISTS triage_sender_preferences (id TEXT PRIMARY KEY, account TEXT NOT NULL, sender TEXT NOT NULL, active INTEGER NOT NULL, json TEXT NOT NULL, UNIQUE(account,sender));
     `);
   }
   recoverInterrupted(): void {
@@ -46,10 +47,49 @@ export class JobStore {
       this.db.prepare("INSERT INTO triage_reviews VALUES(?,NULL,?) ON CONFLICT(id) DO UPDATE SET resolved_at=NULL,json=excluded.json").run(item.id, JSON.stringify(review));
     });
   }
-  reviews(): ReviewItem[] { return this.db.prepare("SELECT json FROM triage_reviews WHERE resolved_at IS NULL ORDER BY rowid").all().map((row) => { const review = decode<ReviewItem>(row)!; const work = this.work(review.id); return { ...review, mode: work?.mode, revision: work?.revision, reviewable: work?.mode === "apply" && work.kind === "classify" && !work.plan && review.reason === "LOW_CONFIDENCE" }; }); }
+  reviewItem(id: string): ReviewItem | undefined {
+    const review = decode<ReviewItem>(this.db.prepare("SELECT json FROM triage_reviews WHERE id=? AND resolved_at IS NULL").get(id));
+    if (!review) return;
+    const work = this.work(id);
+    return { ...review, mode: work?.mode, revision: work?.revision, reviewable: work?.mode === "apply" && work.kind === "classify" && work.state === "needs_review" && !work.plan && review.reason === "LOW_CONFIDENCE" && !this.hasAttempt(id) };
+  }
+  reviews(): ReviewItem[] { return this.db.prepare("SELECT id FROM triage_reviews WHERE resolved_at IS NULL ORDER BY rowid").all().map(row => this.reviewItem(row.id as string)!); }
+  hasAttempt(id: string): boolean { return !!this.db.prepare("SELECT 1 FROM triage_mutation_attempts WHERE work_id=? LIMIT 1").get(id); }
+  hasHumanIntent(id: string): boolean { return !!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='automation_human_review_intents'").get() && !!this.db.prepare("SELECT 1 FROM automation_human_review_intents WHERE item_id=?").get(id); }
+  acceptHuman(id: string, decision: Decision): ReviewItem {
+    return transaction(this.db, () => {
+      const item = this.work(id), review = this.reviewItem(id);
+      if (!item || !review?.reviewable || !decision.humanReview || item.revision !== decision.humanReview.revision || this.hasAttempt(id)) throw new Error("REVIEW_NOT_RESOLVABLE");
+      item.decision = decision; item.state = "classified"; delete item.reason; this.saveWork(item);
+      review.category = decision.category; review.resolvedAt = new Date().toISOString();
+      this.db.prepare("UPDATE triage_reviews SET resolved_at=?,json=? WHERE id=?").run(review.resolvedAt, JSON.stringify(review), id);
+      return review;
+    });
+  }
+  preference(account: string, sender: string): { version: number; preference?: SenderPreference } {
+    const row = this.db.prepare("SELECT active,json FROM triage_sender_preferences WHERE account=? AND sender=?").get(account, sender);
+    const value = decode<SenderPreference>(row);
+    return { version: value?.version ?? 0, ...(row?.active && value ? { preference: value } : {}) };
+  }
+  preferences(accounts: string[]): SenderPreference[] { return this.db.prepare("SELECT json FROM triage_sender_preferences WHERE active=1 ORDER BY account,sender").all().map(row => decode<SenderPreference>(row)!).filter(item => accounts.includes(item.account)); }
+  rememberPreference(account: string, sender: string, category: Category, expectedVersion: number): boolean {
+    return transaction(this.db, () => {
+      const current = this.preference(account, sender);
+      if (current.version !== expectedVersion) return current.preference?.category === category;
+      const now = new Date().toISOString(), id = createHash("sha256").update(JSON.stringify([account,sender])).digest("hex");
+      const value: SenderPreference = { id, account, sender, category, createdAt: current.preference?.createdAt ?? now, updatedAt: now, version: current.version + 1 };
+      this.db.prepare("INSERT INTO triage_sender_preferences VALUES(?,?,?,1,?) ON CONFLICT(id) DO UPDATE SET active=1,json=excluded.json").run(id,account,sender,JSON.stringify(value)); return true;
+    });
+  }
+  forgetPreference(id: string, accounts: string[]): void {
+    const row = this.db.prepare("SELECT json FROM triage_sender_preferences WHERE id=? AND active=1").get(id), value = decode<SenderPreference>(row);
+    if (!value || !accounts.includes(value.account)) throw new Error("PREFERENCE_NOT_FOUND");
+    this.db.prepare("UPDATE triage_sender_preferences SET active=0,json=? WHERE id=?").run(JSON.stringify({ ...value, version: value.version + 1, updatedAt: new Date().toISOString() }), id);
+  }
   isOwnedMessage(account: string, id: string, rfcId?: string): boolean { return !!this.db.prepare("SELECT 1 FROM owned_generated_messages WHERE account=? AND (gmail_message_id=? OR rfc_message_id=?)").get(account, id, rfcId ?? ""); }
   acceptAgent(id: string, decision: Decision): ReviewItem {
     return transaction(this.db, () => {
+      if (this.hasHumanIntent(id)) throw new Error("REVIEW_HUMAN_PENDING");
       const item = this.work(id); const review = this.reviews().find((entry) => entry.id === id);
       if (!item || !review?.reviewable || !decision.agentReview || item.revision !== decision.agentReview.revision) throw new Error("REVIEW_NOT_RESOLVABLE");
       item.decision = decision; item.state = "classified"; delete item.reason; this.saveWork(item);
@@ -60,11 +100,12 @@ export class JobStore {
   }
   resolve(id: string, category: Category): ReviewItem {
     return transaction(this.db, () => {
+      if (this.hasHumanIntent(id)) throw new Error("REVIEW_HUMAN_PENDING");
       const item = this.work(id);
       const review = decode<ReviewItem>(this.db.prepare("SELECT json FROM triage_reviews WHERE id=? AND resolved_at IS NULL").get(id));
       if (!item || !review || item.kind !== "classify") throw new Error("REVIEW_NOT_RESOLVABLE");
       // A human category decision never authorizes replay of a partially applied mutation.
-      if (item.plan && !["MAIL_CHANGED_BEFORE_APPLY"].includes(review.reason)) throw new Error("REVIEW_UNCERTAIN_MUTATION_REQUIRES_RECONCILIATION");
+      if (this.hasAttempt(id) || item.plan && !["MAIL_CHANGED_BEFORE_APPLY"].includes(review.reason)) throw new Error("REVIEW_UNCERTAIN_MUTATION_REQUIRES_RECONCILIATION");
       item.decision = { category, confidence: 1, probabilities: {} as Decision["probabilities"], model: "human", reviewed: true };
       // Explicit review may replace a never-attempted plan. Uncertain writes remain unreplayable.
       delete item.plan; delete item.labelRevision;
