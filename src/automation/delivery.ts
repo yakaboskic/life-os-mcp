@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { createMimeMessage } from "mimetext";
+import { renderBriefEmailHtml } from "./brief-email.js";
 import type { gmail_v1 } from "googleapis";
 import type { GmailManagerLike } from "../toolsets/gmail/client.js";
 import { getHeader } from "../toolsets/gmail/mime.js";
@@ -8,15 +9,43 @@ import type { BriefDelivery, BriefDeliveryGateway, BriefingArtifact } from "./ty
 // Require exactly one mailbox. Extracting the first <address> would accept extra recipients.
 const address = (value: string) => { const match = value.trim().match(/^(?:[^<>,;]*<([^<>]+)>|([^<>,;\s]+))$/); return (match?.[1] ?? match?.[2] ?? "").trim().toLowerCase(); };
 const plain = (value: string) => value.replace(/\r\n/g, "\n").trim();
+const HTML_HASH_HEADER = "X-LifeOS-Brief-HTML-SHA256";
+const MAX_PLAIN_BYTES = 64_000, MAX_HTML_BYTES = 256_000;
+const hash = (value: string): string => createHash("sha256").update(plain(value)).digest("hex");
+function storedHtmlHash(raw: string): string | undefined {
+  // This is the immutable outbox MIME we prepared, never a header supplied by Gmail.
+  // Pinning the HTML hash here also permits reconciliation after a renderer update.
+  const headers = Buffer.from(raw, "base64url").toString("utf8").split(/\r?\n\r?\n/, 1)[0] ?? "";
+  const values = headers.split(/\r?\n/).filter(line => line.toLowerCase().startsWith(HTML_HASH_HEADER.toLowerCase() + ":"));
+  if (!values.length) return undefined;
+  const value = values[0]!.slice(HTML_HASH_HEADER.length + 1).trim();
+  if (values.length !== 1 || !/^[a-f0-9]{64}$/.test(value)) throw new Error("BRIEF_STORED_MIME_INVALID");
+  return value;
+}
+function decodedPart(part: gmail_v1.Schema$MessagePart | undefined, type: string, limit: number): string {
+  const body = part?.body;
+  if (part?.mimeType !== type || part.filename || part.parts?.length || body?.attachmentId || typeof body?.data !== "string" || !/^[A-Za-z0-9_-]*={0,2}$/.test(body.data) || body.data.length > Math.ceil(limit / 3) * 4 || !Number.isSafeInteger(body.size) || body.size! < 0 || body.size! > limit) throw new Error("BRIEF_SENT_MIME_MISMATCH");
+  const decoded = Buffer.from(body.data, "base64url");
+  if (decoded.byteLength !== body.size) throw new Error("BRIEF_SENT_MIME_MISMATCH");
+  try { return new TextDecoder("utf-8", { fatal: true }).decode(decoded); }
+  catch { throw new Error("BRIEF_SENT_MIME_MISMATCH"); }
+}
 const IDENTITY_HEADERS = ["Message-ID", "From", "To", "Cc", "Bcc", "Subject", "X-LifeOS-Brief-ID"];
 const queryValue = (value: string) => `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 export class GmailBriefDelivery implements BriefDeliveryGateway {
   constructor(private readonly manager: GmailManagerLike, private readonly account: string, private readonly recipient: string) {}
   prepare(artifact: BriefingArtifact, account: string, recipient: string, messageId: string): string {
+    if (Buffer.byteLength(artifact.markdown) > MAX_PLAIN_BYTES) throw new Error("BRIEF_BODY_TOO_LARGE");
+    const html = renderBriefEmailHtml(artifact.markdown);
+    if (Buffer.byteLength(html) > MAX_HTML_BYTES) throw new Error("BRIEF_BODY_TOO_LARGE");
     const msg = createMimeMessage(); msg.setSender({ addr: account }); msg.setTo([recipient]); msg.setSubject(`LifeOS daily brief — ${artifact.day}`);
     msg.setHeader("Message-ID", messageId); msg.setHeader("Date", new Date(artifact.createdAt).toUTCString());
     msg.setHeader("Auto-Submitted", "auto-generated"); msg.setHeader("X-LifeOS-Brief-ID", artifact.id);
-    msg.addMessage({ contentType: "text/plain", data: artifact.markdown, charset: "UTF-8" });
+    msg.setHeader(HTML_HASH_HEADER, hash(html));
+    // MIMEText accepts already-encoded data; base64 keeps Unicode and long lines intact.
+    const encoded = (value: string) => Buffer.from(value, "utf8").toString("base64").match(/.{1,76}/g)?.join("\r\n") ?? "";
+    msg.addMessage({ contentType: "text/plain", data: encoded(artifact.markdown), charset: "UTF-8", encoding: "base64" });
+    msg.addMessage({ contentType: "text/html", data: encoded(html), charset: "UTF-8", encoding: "base64" });
     return Buffer.from(msg.asRaw(), "utf8").toString("base64url");
   }
   async send(delivery: BriefDelivery, raw: string, signal: AbortSignal): Promise<{ id: string; threadId?: string }> {
@@ -32,6 +61,7 @@ export class GmailBriefDelivery implements BriefDeliveryGateway {
   async reconcile(delivery: BriefDelivery, raw: string, signal: AbortSignal): Promise<{ id: string; threadId?: string } | null> {
     return this.manager.withClient(delivery.account, async (gmail, email) => {
       if (email !== delivery.account || delivery.account !== this.account || delivery.recipient !== this.recipient || email !== delivery.recipient) throw new Error("BRIEF_DELIVERY_ACCOUNT_MISMATCH");
+      const expectedHtmlHash = storedHtmlHash(raw);
       const attempted = Date.parse(delivery.attemptedAt ?? delivery.createdAt);
       if (!Number.isFinite(attempted)) throw new Error("BRIEF_DELIVERY_TIME_INVALID");
       const after = Math.floor(attempted / 1000) - 300, before = Math.floor(attempted / 1000) + 24 * 60 * 60;
@@ -82,14 +112,24 @@ export class GmailBriefDelivery implements BriefDeliveryGateway {
       if (matches.length > 1) throw new Error("BRIEF_MULTIPLE_SENT_MATCHES");
       if (!matches.length) return null;
       const id = matches[0]!.id!;
-      if (!Number.isSafeInteger(matches[0]!.sizeEstimate) || matches[0]!.sizeEstimate! < 0 || matches[0]!.sizeEstimate! > 96_000) throw new Error("BRIEF_SENT_RESPONSE_TOO_LARGE");
-      const result = await gmail.users.messages.get({ userId: "me", id, format: "full" }, { signal, timeout: 30_000, maxContentLength: 128_000 });
-      const payload = result.data.payload, body = payload?.body;
-      // prepare() emits one plain-text part. A generic MIME parser could silently ignore
-      // extra text/HTML parts or attachments and hash only a misleading first part.
-      if (payload?.mimeType !== "text/plain" || payload.filename || payload.parts?.length || body?.attachmentId || typeof body?.data !== "string" || !/^[A-Za-z0-9_-]*={0,2}$/.test(body.data) || !Number.isSafeInteger(body.size) || body.size! < 0 || body.size! > 64_000) throw new Error("BRIEF_SENT_MIME_MISMATCH");
-      const decoded = Buffer.from(body.data, "base64url");
-      if (decoded.byteLength !== body.size || !identityMatches(result.data) || result.data.id !== id || createHash("sha256").update(plain(decoded.toString("utf8"))).digest("hex") !== delivery.contentHash) throw new Error("BRIEF_SENT_IDENTITY_MISMATCH");
+      const maxMessageBytes = expectedHtmlHash ? 512_000 : 96_000;
+      if (!Number.isSafeInteger(matches[0]!.sizeEstimate) || matches[0]!.sizeEstimate! < 0 || matches[0]!.sizeEstimate! > maxMessageBytes) throw new Error("BRIEF_SENT_RESPONSE_TOO_LARGE");
+      const result = await gmail.users.messages.get({ userId: "me", id, format: "full" }, { signal, timeout: 30_000, maxContentLength: expectedHtmlHash ? 600_000 : 128_000 });
+      const payload = result.data.payload;
+      let text: string;
+      if (!expectedHtmlHash && payload?.mimeType === "text/plain") {
+        // Existing outbox records and Sent mail keep their original plain-only format.
+        text = decodedPart(payload, "text/plain", MAX_PLAIN_BYTES);
+      } else {
+        // Only our exact alternative shape is allowed; no ignored MIME parts or attachments.
+        if (!expectedHtmlHash || payload?.mimeType !== "multipart/alternative" || payload.filename || payload.body?.attachmentId || payload.body?.data || (payload.body?.size ?? 0) !== 0 || payload.parts?.length !== 2) throw new Error("BRIEF_SENT_MIME_MISMATCH");
+        const textParts = payload.parts.filter(part => part.mimeType === "text/plain"), htmlParts = payload.parts.filter(part => part.mimeType === "text/html");
+        if (textParts.length !== 1 || htmlParts.length !== 1) throw new Error("BRIEF_SENT_MIME_MISMATCH");
+        text = decodedPart(textParts[0], "text/plain", MAX_PLAIN_BYTES);
+        const html = decodedPart(htmlParts[0], "text/html", MAX_HTML_BYTES);
+        if (hash(html) !== expectedHtmlHash) throw new Error("BRIEF_SENT_IDENTITY_MISMATCH");
+      }
+      if (!identityMatches(result.data) || result.data.id !== id || hash(text) !== delivery.contentHash) throw new Error("BRIEF_SENT_IDENTITY_MISMATCH");
       return { id, threadId: result.data.threadId ?? undefined };
     }, { readOnly: true });
   }

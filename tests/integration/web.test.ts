@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeAll, afterAll } from "vitest";
+import { describe, expect, it, beforeAll, afterAll, vi } from "vitest";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +13,9 @@ describe("web portal", () => {
   let base: string;
 
   beforeAll(async () => {
+    // Keep the fixed fixture inside the dashboard's rolling 90-day entry window.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-08-04T12:00:00Z"));
     const home = mkdtempSync(join(tmpdir(), "life-os-web-"));
     const config = loadConfig({ LIFE_OS_HOME: home } as NodeJS.ProcessEnv);
     const store = new TrackStore(config);
@@ -32,6 +35,7 @@ describe("web portal", () => {
   afterAll(() => {
     server.close();
     server.closeAllConnections();
+    vi.useRealTimers();
   });
 
   it("serves the self-contained portal page", async () => {
