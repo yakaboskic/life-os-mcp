@@ -1,4 +1,4 @@
-import type { JobRun, ReviewItem, AgentReviewContext, AgentReviewProposal, Category, SenderPreference, ReviewInspection } from "../jobs/types.js";
+import type { JobRun, ReviewItem, AgentReviewContext, AgentReviewProposal, Category, SenderPreference, ReviewInspection, ReviewDecisionDiagnostics } from "../jobs/types.js";
 
 export const AUTOMATION_POLICY = "lifeos-review-v1";
 export type AutomationKind = "review" | "brief" | "daily";
@@ -35,7 +35,7 @@ export interface ReviewCommandProgress { requestId: string; runId: string | null
 export interface ReviewQueuePage { items: ReviewQueueItem[]; total: number; limit: number; nextCursor: string | null; counts: { total: number; awaitingAgent: number; needsDecision: number; needsContext: number; queued: number }; accounts: string[]; preferences: SenderPreference[]; pendingCommands: ReviewCommandProgress[] }
 export type ReviewDetail = Omit<ReviewInspection, "item"> & { item: ReviewQueueItem };
 export type AutomationAction = "automation.run" | "automation.schedule" | "review.resolve" | "review.bulkResolve" | "review.forgetPreference";
-export interface AutomationReviewDecision { id: string; account: string; category: string | null; state: "held" | "accepted" | "applied"; model: string; reason: string; createdAt: string }
+export interface AutomationReviewDecision extends ReviewDecisionDiagnostics { id: string; account: string; category: string | null; state: "held" | "accepted" | "applied"; model: string; reason: string; createdAt: string }
 export interface BriefSource { id: string; kind: "task" | "project" | "product" | "triage" | "review" | "focus" | "time"; title: string; details: string }
 export interface BriefInput { day: string; now: string; sources: BriefSource[]; coverage: string[] }
 export interface BriefProposal { title: string; summary: string; priorities: Array<{ title: string; detail: string; sourceIds: string[] }>; notes: string[] }

@@ -58,16 +58,16 @@ describe("dashboard action requests", () => {
 
   it("escapes optional review rationale and limits the recent decision disclosure", () => {
     const esc = script.slice(script.indexOf("  const esc ="), script.indexOf("  const timeHM ="));
-    const review = script.slice(script.indexOf("  function reviewRationale("), script.indexOf("  function renderAutomation("));
+    const review = script.slice(script.indexOf("  function reviewPercent("), script.indexOf("  function renderAutomation("));
     const { reviewRationale, decisionHistory } = runInNewContext(`${esc}${review}\n({ reviewRationale, decisionHistory });`, {
       jobTime: () => "Oct 18, 09:00",
       jobStatus: (value: string) => value,
     });
     const decision = { category: null, reason: '<img src=x onerror="bad()">', model: 'claude-"test', account: "owner@example.com", state: "held" };
-    expect(reviewRationale(undefined)).toBe("");
+    expect(reviewRationale(undefined)).toContain("No Claude review is recorded for this version");
     const rationale = reviewRationale(decision);
     expect(rationale).toContain("No clear category");
-    expect(rationale).toContain("This is a proposal");
+    expect(rationale).toContain("Choose the category you want to apply");
     expect(rationale).toContain("&lt;img src=x onerror=&quot;bad()&quot;&gt;");
     expect(rationale).not.toContain("<img");
     expect(decisionHistory(undefined, false)).toBe("");

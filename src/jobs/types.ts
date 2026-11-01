@@ -40,11 +40,16 @@ export interface JobRun {
   startedAt: string; finishedAt?: string; accounts: AccountResult[]; errorCode?: string;
   reviewedIds?: string[];
 }
+export type ReviewGateReason = "accepted" | "not_clear" | "needs_context" | "no_category" | "below_threshold" | "policy_error";
+export interface ReviewDecisionDiagnostics { confidence?: number; clear?: boolean; needsMoreContext?: boolean; gateReason?: ReviewGateReason }
+export interface ClassificationDiagnostics { provider: "jev"; model: string; category: Category; confidence: number; probabilities: Partial<Record<Category, number>>; minimumConfidence: number }
+export interface AgentReviewSummary extends ReviewDecisionDiagnostics { category: Category | null; reason: string; model: string; createdAt: string; source: "claude" | "policy"; minimumConfidence: number }
 export interface ReviewItem {
   id: string; account: string; threadId: string; subject: string; sender: string;
   category?: Category; confidence?: number; reason: string; createdAt: string; resolvedAt?: string;
   mode?: RunMode; revision?: string; reviewable?: boolean;
-  agentReview?: { category: Category | null; reason: string; model: string; createdAt: string };
+  classification?: ClassificationDiagnostics;
+  agentReview?: AgentReviewSummary;
 }
 export interface AgentReviewContext { itemId: string; revision: string; policyVersion: string; account: string; now: string; thread: MailThread; triggerIds: string[]; proposedCategory?: Category; senderPreference?: SenderPreference; preferenceEvidence?: { sender: string; version: number } }
 export interface AgentReviewProposal { itemId: string; revision: string; policyVersion: string; category: Category | null; clear: boolean; confidence: number; needsMoreContext: boolean; reason: string; evidence: Array<{ messageId: string; quote: string }>; preferenceEvidence?: { sender: string; version: number } }

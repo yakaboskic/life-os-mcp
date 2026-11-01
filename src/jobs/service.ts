@@ -9,6 +9,7 @@ import { openDatabase, transaction } from "../state/database.js";
 import { TrackStore } from "../toolsets/track/store.js";
 import { GmailJobGateway } from "./gmail.js";
 import { CATEGORY_CRITERIA, JevClassifier } from "./jev.js";
+import { JEV_MINIMUM_CONFIDENCE, CLAUDE_MINIMUM_CONFIDENCE } from "./policy.js";
 import { JobStore, type WorkItem } from "./store.js";
 import { ACTIVE_CATEGORIES, CATEGORIES, RUBRIC_VERSION, TIME_ZONE, type AgentReviewContext, type AgentReviewProposal, type AccountResult, type Category, type Classifier, type JobRun, type JobService, type JobStatus, type MailGateway, type MailMessage, type MailThread, type MutationPlan, type ReviewItem, type StartJobInput, type ReviewInspection, type HumanReviewInput } from "./types.js";
 
@@ -166,7 +167,7 @@ class GmailTriageService implements JobService {
   async acceptAgentReview(proposal: AgentReviewProposal, model: string, signal: AbortSignal, guard?: () => void): Promise<ReviewItem> {
     const context = await this.reviewContext(proposal.itemId, signal);
     if (proposal.preferenceEvidence && JSON.stringify(proposal.preferenceEvidence) !== JSON.stringify(context.preferenceEvidence)) throw new Error("REVIEW_PREFERENCE_CHANGED");
-    if (proposal.revision !== context.revision || proposal.policyVersion !== context.policyVersion || !proposal.clear || proposal.needsMoreContext || !Number.isFinite(proposal.confidence) || proposal.confidence < 0.95 || proposal.confidence > 1 || !proposal.category || !CATEGORIES.includes(proposal.category)) throw new Error("REVIEW_NOT_CLEAR");
+    if (proposal.revision !== context.revision || proposal.policyVersion !== context.policyVersion || !proposal.clear || proposal.needsMoreContext || !Number.isFinite(proposal.confidence) || proposal.confidence < CLAUDE_MINIMUM_CONFIDENCE || proposal.confidence > 1 || !proposal.category || !CATEGORIES.includes(proposal.category)) throw new Error("REVIEW_NOT_CLEAR");
     if (!proposal.reason.trim() || proposal.reason.length > 600 || proposal.evidence.length < 1 || proposal.evidence.length > 3 || !model.startsWith("claude-")) throw new Error("REVIEW_INVALID_EVIDENCE");
     const normalize = (value: string) => value.replace(/\s+/g, " ").trim();
     if (!proposal.evidence.some(evidence => context.triggerIds.includes(evidence.messageId)) || proposal.evidence.some(evidence => {
@@ -322,7 +323,7 @@ class GmailTriageService implements JobService {
           work.state = "classified"; this.store.saveWork(work);
         }
         if (work.decision.preferenceEvidence && this.store.preference(work.account, work.decision.preferenceEvidence.sender).version !== work.decision.preferenceEvidence.version) { this.store.review(work, "REVIEW_PREFERENCE_CHANGED"); result.held++; return; }
-        if (work.decision.confidence < 0.9) { this.store.review(work, "LOW_CONFIDENCE"); result.held++; return; }
+        if (work.decision.confidence < JEV_MINIMUM_CONFIDENCE) { this.store.review(work, "LOW_CONFIDENCE"); result.held++; return; }
         if (work.mode === "dry-run") { work.state = "applied"; this.store.saveWork(work); result.processed++; return; }
         // Persist relevant preconditions before re-fetching. Unrelated labels and UNREAD do not matter.
         work.plan ??= this.plan(thread, labels, work.decision.category);
@@ -467,7 +468,7 @@ class GmailTriageService implements JobService {
     const sample = [...new Map([...categories.map((group) => group.items[0]!), ...decisions].map((work) => [work.id, work])).values()].slice(0, 20);
     const text = (value: string) => value.replace(/[\r\n`]/g, " ").slice(0, 120);
     const models = [...new Set(decisions.flatMap((work) => work.decision ? [work.decision.model] : []))];
-    const lines = [`## ${run.day} — ${run.mode}`, ``, `Run: ${run.id}`, `Finished: ${run.finishedAt}`, `Mode: ${run.mode}`, `State: ${run.state}`, `Schedule: daily 05:53 ${TIME_ZONE}`, ``, ...run.accounts.map((account) => `- ${account.account}: ${account.state}; ${account.processed} processed, ${account.held} held, ${account.failed} failed, ${account.completed} completed${account.errorCode ? ` (${account.errorCode})` : ""}.`), ``, `### Classification evidence`, ``, `Rubric: ${RUBRIC_VERSION}. Automatic application requires confidence of at least 0.90.`, ...(run.mode === "dry-run" ? [`Shadow mode made no Gmail or task changes.`] : []), ``, ...categories.map(({ category, items }) => `- ${category}: ${items.length} decisions; ${items.filter((work) => work.decision!.confidence >= 0.9).length} meet the confidence threshold.`), ``, `### Decision sample (${sample.length} of ${decisions.length})`, ``, ...sample.map((work) => `- \`${work.decision?.category ?? "NEEDS REVIEW"}\` · confidence ${work.decision?.confidence.toFixed(3) ?? "unavailable"} · \`${text(work.subject || "No subject")}\` · ${work.state}${work.reason ? ` (${work.reason})` : ""} · [Open email](https://mail.google.com/mail/u/?authuser=${encodeURIComponent(work.account)}#all/${encodeURIComponent(work.threadId)})`), ``, `Pending reviews: ${this.reviews().length}`, ``, `Held mail remains in its current Gmail state. Review using life-os triage review list.`, ``];
+    const lines = [`## ${run.day} — ${run.mode}`, ``, `Run: ${run.id}`, `Finished: ${run.finishedAt}`, `Mode: ${run.mode}`, `State: ${run.state}`, `Schedule: daily 05:53 ${TIME_ZONE}`, ``, ...run.accounts.map((account) => `- ${account.account}: ${account.state}; ${account.processed} processed, ${account.held} held, ${account.failed} failed, ${account.completed} completed${account.errorCode ? ` (${account.errorCode})` : ""}.`), ``, `### Classification evidence`, ``, `Rubric: ${RUBRIC_VERSION}. Automatic application requires confidence of at least ${JEV_MINIMUM_CONFIDENCE.toFixed(2)}.`, ...(run.mode === "dry-run" ? [`Shadow mode made no Gmail or task changes.`] : []), ``, ...categories.map(({ category, items }) => `- ${category}: ${items.length} decisions; ${items.filter((work) => work.decision!.confidence >= JEV_MINIMUM_CONFIDENCE).length} meet the confidence threshold.`), ``, `### Decision sample (${sample.length} of ${decisions.length})`, ``, ...sample.map((work) => `- \`${work.decision?.category ?? "NEEDS REVIEW"}\` · confidence ${work.decision?.confidence.toFixed(3) ?? "unavailable"} · \`${text(work.subject || "No subject")}\` · ${work.state}${work.reason ? ` (${work.reason})` : ""} · [Open email](https://mail.google.com/mail/u/?authuser=${encodeURIComponent(work.account)}#all/${encodeURIComponent(work.threadId)})`), ``, `Pending reviews: ${this.reviews().length}`, ``, `Held mail remains in its current Gmail state. Review using life-os triage review list.`, ``];
     lines.splice(lines.indexOf("### Classification evidence") + 2, 0, `Validated models: ${models.join(", ") || "none yet"}.`);
     const path=join(this.config.triageLogDir,"email.md");
     let prior="";try {prior=readFileSync(path,"utf8").replace(/^# [^\n]*\n/,"").trim();} catch {}

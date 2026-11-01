@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { transaction } from "../state/database.js";
-import type { Category, Decision, JobRun, MutationPlan, ReviewItem, RunMode, SenderPreference } from "./types.js";
+import { CATEGORIES, type Category, type Decision, type JobRun, type MutationPlan, type ReviewItem, type RunMode, type SenderPreference } from "./types.js";
+import { JEV_MINIMUM_CONFIDENCE } from "./policy.js";
 
 export type WorkState = "discovered" | "classified" | "applying" | "applied" | "retryable" | "needs_review" | "superseded";
 export interface WorkItem {
@@ -51,7 +52,13 @@ export class JobStore {
     const review = decode<ReviewItem>(this.db.prepare("SELECT json FROM triage_reviews WHERE id=? AND resolved_at IS NULL").get(id));
     if (!review) return;
     const work = this.work(id);
-    return { ...review, mode: work?.mode, revision: work?.revision, reviewable: work?.mode === "apply" && work.kind === "classify" && work.state === "needs_review" && !work.plan && review.reason === "LOW_CONFIDENCE" && !this.hasAttempt(id) };
+    const decision = work?.decision;
+    // Do not relabel a later human/Claude decision as the original Jev result.
+    const classification = typeof decision?.model === "string" && decision.model.startsWith("jev-") && !decision.reviewed && !decision.agentReview && !decision.humanReview && CATEGORIES.includes(decision.category) && Number.isFinite(decision.confidence) && decision.confidence >= 0 && decision.confidence <= 1
+      ? { provider: "jev" as const, model: decision.model, category: decision.category, confidence: decision.confidence,
+          probabilities: Object.fromEntries(CATEGORIES.flatMap(category => { const value = decision.probabilities?.[category]; return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1 ? [[category, value]] : []; })), minimumConfidence: JEV_MINIMUM_CONFIDENCE }
+      : undefined;
+    return { ...review, ...(classification ? { classification } : {}), mode: work?.mode, revision: work?.revision, reviewable: work?.mode === "apply" && work.kind === "classify" && work.state === "needs_review" && !work.plan && review.reason === "LOW_CONFIDENCE" && !this.hasAttempt(id) };
   }
   reviews(): ReviewItem[] { return this.db.prepare("SELECT id FROM triage_reviews WHERE resolved_at IS NULL ORDER BY rowid").all().map(row => this.reviewItem(row.id as string)!); }
   hasAttempt(id: string): boolean { return !!this.db.prepare("SELECT 1 FROM triage_mutation_attempts WHERE work_id=? LIMIT 1").get(id); }

@@ -392,6 +392,14 @@ export const PORTAL_HTML = `<!doctype html>
   .review-context a { display: inline-block; padding: 12px 0 0; }
   .review-rationale { border-left-color: var(--accent); }
   .review-rationale .rationale-text { color: var(--ink); white-space: pre-wrap; }
+  .review-diagnostics h3, .review-rationale h3 { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+  .review-diagnostics .review-hold-reason { color: var(--ink); }
+  .review-score-table { width: 100%; max-width: 420px; border-collapse: collapse; margin: 14px 0 10px; font-size: 13px; }
+  .review-score-table caption { text-align: left; color: var(--ink-2); margin-bottom: 6px; }
+  .review-score-table th, .review-score-table td { padding: 6px 8px 6px 0; border-bottom: 1px solid var(--line); text-align: left; font-weight: 400; }
+  .review-score-table thead th { color: var(--muted); font-size: 12px; }
+  .review-score-table th:last-child, .review-score-table td:last-child { text-align: right; padding-right: 0; white-space: nowrap; }
+  .review-score-table td:last-child { font-family: var(--mono); color: var(--accent-2); }
   .decision-history { margin-top: 18px; }
   .decision-history summary { color: var(--ink-2); cursor: pointer; font-size: 12px; padding-bottom: 10px; }
   .decision-history .review-context { margin-bottom: 10px; }
@@ -1574,9 +1582,40 @@ export const PORTAL_HTML = `<!doctype html>
   let automationAvailable = false;
   let automationSequence = 0;
   const REVIEW_CATEGORIES = ["ACTION/NOW", "ACTION/SOON", "WAITING", "CALENDAR", "FINANCE/RECEIPT", "LEGAL/COMPLIANCE", "FYI/READ", "NEWSLETTER", "SPAM/SUSPECT"];
+  function reviewPercent(value, threshold) {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1) return null;
+    const rounded = Number((value * 100).toFixed(2));
+    return typeof threshold === 'number' && value < threshold && rounded >= threshold * 100 ? '<' + Number((threshold * 100).toFixed(2)) + '%' : rounded + '%';
+  }
+  function reviewIsPolicy(review) { return review?.source === 'policy' || review?.model === 'policy'; }
+  function reviewHoldText(item) {
+    if (item.reason !== 'LOW_CONFIDENCE') return reviewOutcomeText(item.reason);
+    const classification = item.classification;
+    const confidence = reviewPercent(classification?.confidence, classification?.minimumConfidence), threshold = reviewPercent(classification?.minimumConfidence);
+    return confidence && threshold ? 'Jev confidence ' + confidence + '; automatic filing currently requires at least ' + threshold + '.' : 'Classifier confidence was below the automatic-filing threshold. Classification diagnostics are not available here.';
+  }
+  function reviewSuggestions(item) {
+    const classification = item.classification, review = item.agentReview;
+    const initial = classification?.category ? '<p class="review-suggestion">Jev suggested: ' + esc(classification.category) + '</p>' : item.category ? '<p class="review-suggestion">Recorded category: ' + esc(item.category) + '</p>' : '';
+    const subsequent = reviewIsPolicy(review) ? 'Review blocked by policy' : review ? 'Claude proposal: ' + (review.category || 'No clear category') : 'No Claude review recorded for this version';
+    return initial + '<p class="review-suggestion">' + esc(subsequent) + '</p>';
+  }
+  function reviewDiagnostics(item) {
+    const classification = item.classification;
+    const scores = classification?.probabilities && typeof classification.probabilities === 'object' ? Object.entries(classification.probabilities).filter(([category, value]) => REVIEW_CATEGORIES.includes(category) && reviewPercent(value) !== null).sort((a, b) => b[1] - a[1] || REVIEW_CATEGORIES.indexOf(a[0]) - REVIEW_CATEGORIES.indexOf(b[0])).slice(0, 3) : [];
+    const table = scores.length ? '<table class="review-score-table"><caption>Top recorded category probabilities</caption><thead><tr><th scope="col">Category</th><th scope="col">Probability</th></tr></thead><tbody>' + scores.map(([category, value]) => '<tr><th scope="row">' + esc(category) + '</th><td>' + esc(reviewPercent(value)) + '</td></tr>').join('') + '</tbody></table><p>Confidence summarizes the category probabilities and is separate from the selected category’s probability. Automatic filing checks the confidence.</p>' : '<p>Category probabilities were not recorded for this item.</p>';
+    return '<section class="review-context review-diagnostics" aria-label="Why held"><h3>Why held</h3><p class="review-hold-reason">' + esc(reviewHoldText(item)) + '</p>' +
+      (classification ? '<p>Jev suggested: <strong>' + esc(classification.category) + '</strong></p><p>Model: ' + esc(classification.model) + '</p>' + (item.reason !== 'LOW_CONFIDENCE' ? '<p>Recorded Jev confidence: ' + esc(reviewPercent(classification.confidence) || 'not recorded') + '. Current confidence requirement: ' + esc(reviewPercent(classification.minimumConfidence) || 'not recorded') + '.</p>' : '') + table + '<p>Jev returned scores, not a written explanation.</p>' : '<p>' + (item.reason === 'INSUFFICIENT_OR_TRUNCATED_CONTEXT' ? 'The context check stopped classification before Jev produced a result.' : 'No original Jev classification details are available for this item.') + '</p>') + '</section>';
+  }
   function reviewRationale(review) {
-    if (!review) return '';
-    return '<div class="review-context review-rationale"><strong>Claude review · ' + esc(review.category || 'No clear category') + '</strong><p class="rationale-text">' + esc(review.reason) + '</p><p>' + esc(review.model) + ' · ' + jobTime(review.createdAt) + '</p><p>This is a proposal. Choose the category you want to apply.</p></div>';
+    if (!review) return '<div class="review-context review-rationale"><h3>Claude review</h3><p>No Claude review is recorded for this version of the conversation.</p></div>';
+    if (reviewIsPolicy(review)) return '<div class="review-context review-rationale"><h3>Review blocked by policy</h3><p class="rationale-text">' + esc(reviewOutcomeText(review.reason)) + '</p><p>' + jobTime(review.createdAt) + '</p><p>This is a recorded policy check, not a Claude explanation.</p></div>';
+    const confidence = reviewPercent(review.confidence, review.minimumConfidence), threshold = reviewPercent(review.minimumConfidence);
+    const checks = { accepted: 'Claude confidence and clarity checks passed. This does not confirm Gmail changes.', needs_context: 'Claude requested more context.', not_clear: 'Claude did not mark the category as clear.', no_category: 'Claude did not choose a category.', below_threshold: 'Claude confidence did not meet the automatic-review requirement.' };
+    const flags = typeof review.clear === 'boolean' && typeof review.needsMoreContext === 'boolean' ? '<p>Clear category: ' + (review.clear ? 'yes' : 'no') + '. More context requested: ' + (review.needsMoreContext ? 'yes' : 'no') + '.</p>' : '<p>The clear-category and context checks were not recorded for this review.</p>';
+    return '<div class="review-context review-rationale"><h3>Claude review</h3><p>Proposal: <strong>' + esc(review.category || 'No clear category') + '</strong></p><p class="rationale-text">' + esc(review.reason) + '</p>' +
+      '<p>' + (confidence ? 'Recorded confidence: ' + esc(confidence) + (threshold ? '; automatic review currently requires at least ' + esc(threshold) : '') + '.' : 'Confidence was not recorded for this review.') + '</p>' + flags +
+      (checks[review.gateReason] ? '<p>' + esc(checks[review.gateReason]) + '</p>' : '') + '<p>Model: ' + esc(review.model) + ' · ' + jobTime(review.createdAt) + '</p><p>Choose the category you want to apply.</p></div>';
   }
   function decisionHistory(decisions, open) {
     if (!Array.isArray(decisions) || !decisions.length) return '';
@@ -1698,7 +1737,7 @@ export const PORTAL_HTML = `<!doctype html>
   }
   function reviewSource(item) { return 'https://mail.google.com/mail/u/?authuser=' + encodeURIComponent(item.account) + '#all/' + encodeURIComponent(item.threadId); }
   function reviewOutcomeText(code) {
-    const known = { LOW_CONFIDENCE: 'The classifier was uncertain.', REVIEW_STALE: 'Conversation changed; inspect it again.', REVIEW_EVIDENCE_CHANGED: 'Conversation changed; inspect it again.', REVIEW_REVISION_MISMATCH: 'Conversation changed; inspect it again.', REVIEW_CONTEXT_CHANGED: 'Conversation changed; inspect it again.', REVIEW_NOT_ELIGIBLE: 'No longer actionable.', REVIEW_NOT_FOUND: 'No longer in the queue.', REVIEW_CONTEXT_INCOMPLETE: 'More context is needed.', REVIEW_INCOMPLETE_CONTEXT: 'More context is needed.', INSUFFICIENT_OR_TRUNCATED_CONTEXT: 'More context is needed.', REVIEW_ALREADY_QUEUED: 'This conversation already has queued changes.', UNCERTAIN_GMAIL_MUTATION: 'Gmail changes need reconciliation before another action.', HUMAN_REVIEW_APPLY_FAILED: 'The Gmail change could not finish. Inspect its current state.', REVIEW_PREFERENCE_CHANGED: 'A sender preference changed. Review the conversation again.' };
+    const known = { LOW_CONFIDENCE: 'Classifier confidence was below the automatic-filing threshold.', REVIEW_STALE: 'Conversation changed; inspect it again.', REVIEW_EVIDENCE_CHANGED: 'Conversation changed; inspect it again.', REVIEW_REVISION_MISMATCH: 'Conversation changed; inspect it again.', REVIEW_CONTEXT_CHANGED: 'Conversation changed; inspect it again.', MAIL_CHANGED_SINCE_DISCOVERY: 'Gmail labels changed after the conversation was captured.', MAIL_CHANGED_BEFORE_APPLY: 'The conversation or its labels changed before changes could be applied.', GMAIL_POSTCONDITION_CHANGED: 'Gmail no longer matched the expected result; further changes were held.', REVIEW_NOT_ELIGIBLE: 'No longer actionable.', REVIEW_NOT_FOUND: 'No longer in the queue.', REVIEW_CONTEXT_INCOMPLETE: 'More context is needed.', REVIEW_INCOMPLETE_CONTEXT: 'The available message text did not pass the complete-context check.', INSUFFICIENT_OR_TRUNCATED_CONTEXT: 'Message text is missing, truncated, or exceeds the review limit.', REVIEW_IDENTITY_MISMATCH: 'The proposal did not match this conversation and revision.', REVIEW_NOT_CLEAR: 'The proposal did not pass the clear-category and confidence checks.', REVIEW_INVALID_EVIDENCE: 'The proposal did not pass the supporting-message evidence checks.', REVIEW_NOT_RESOLVABLE: 'The current conversation state does not permit another classification.', REVIEW_ALREADY_QUEUED: 'This conversation already has queued changes.', UNCERTAIN_GMAIL_MUTATION: 'Gmail changes need reconciliation before another action.', HUMAN_REVIEW_APPLY_FAILED: 'The Gmail change could not finish. Inspect its current state.', REVIEW_PREFERENCE_CHANGED: 'A sender preference changed. Review the conversation again.' };
     return known[code] || (code ? actionErrorMessage(code, 'This item needs another look. Inspect its latest conversation.') : '');
   }
   function renderReviewCommands(commands) {
@@ -1748,8 +1787,7 @@ export const PORTAL_HTML = `<!doctype html>
     const focusedType = focused?.hasAttribute?.('data-review-select') ? 'data-review-select' : 'data-review-inspect';
     results.setAttribute('aria-busy', String(state.loading));
     results.innerHTML = items.length ? items.map((item) => {
-      const suggested = item.agentReview?.category || item.category;
-      return '<article class="review-conversation"><label class="review-check"><input type="checkbox" data-review-select="' + esc(item.id) + '" aria-label="Select ' + esc(item.subject || 'conversation without subject') + '"' + (state.selected.has(item.id) ? ' checked' : '') + (!reviewActionable(item) ? ' disabled' : '') + '></label><div><h3>' + esc(item.subject || '(No subject)') + '</h3><p>' + esc(item.sender) + '</p><p>' + esc(item.account) + ' · ' + jobTime(item.createdAt) + '</p>' + (suggested ? '<p class="review-suggestion">Suggested: ' + esc(suggested) + '</p>' : '') + '</div><div class="review-conversation-status">' + jobBadge(REVIEW_BUCKET_LABELS[item.bucket] || 'Held for review') + '<p>' + esc(reviewOutcomeText(item.reason)) + '</p></div><button class="quiet-button" type="button" data-review-inspect="' + esc(item.id) + '">Inspect conversation</button></article>';
+      return '<article class="review-conversation"><label class="review-check"><input type="checkbox" data-review-select="' + esc(item.id) + '" aria-label="Select ' + esc(item.subject || 'conversation without subject') + '"' + (state.selected.has(item.id) ? ' checked' : '') + (!reviewActionable(item) ? ' disabled' : '') + '></label><div><h3>' + esc(item.subject || '(No subject)') + '</h3><p>' + esc(item.sender) + '</p><p>' + esc(item.account) + ' · ' + jobTime(item.createdAt) + '</p>' + reviewSuggestions(item) + '</div><div class="review-conversation-status">' + jobBadge(REVIEW_BUCKET_LABELS[item.bucket] || 'Held for review') + '<p>' + esc(reviewHoldText(item)) + '</p></div><button class="quiet-button" type="button" data-review-inspect="' + esc(item.id) + '">Inspect conversation</button></article>';
     }).join('') : '<p class="review-empty">' + (state.loading && !snapshot ? 'Loading conversations…' : snapshot ? 'No conversations match these filters. Try another search or reset the filters.' : 'The review queue is unavailable. Retry after the connection is ready.') + '</p>';
     if (focusedId && results.contains(focused) === false && focused?.isConnected === false) [...results.querySelectorAll('[' + focusedType + ']')].find((node) => node.getAttribute(focusedType) === focusedId)?.focus({ preventScroll: true });
     const status = $('review-queue-status');
@@ -1813,7 +1851,7 @@ export const PORTAL_HTML = `<!doctype html>
   function reviewConversationHtml(detail) {
     const item = detail.item;
     return '<div class="review-context"><p>' + esc(item.sender) + '</p><p>' + esc(item.account) + '</p><p>' + esc(REVIEW_BUCKET_LABELS[item.bucket] || jobStatus(item.reason)) + '</p><a href="' + esc(reviewSource(item)) + '" target="_blank" rel="noopener noreferrer">Open conversation in Gmail</a></div>' +
-      reviewRationale(item.agentReview) +
+      reviewDiagnostics(item) + reviewRationale(item.agentReview) +
       (detail.changed ? '<p class="review-effect">The conversation changed since this queue entry was captured. Refresh and review the latest context before applying a category.</p>' : '') +
       (detail.blockedReason ? '<p class="review-effect">' + esc(reviewOutcomeText(detail.blockedReason)) + '</p>' : '') +
       (reviewActionable(item) && !detail.changed && !detail.blockedReason ? '<button class="action-button" type="button" data-review-detail-apply>Choose category for this conversation</button>' : '<p class="mutetext">This conversation cannot be classified from its current context. You can inspect the full conversation in Gmail.</p>') +

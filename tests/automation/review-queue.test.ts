@@ -176,3 +176,77 @@ describe("explicit sender preferences",() => {
     expect(f.service.reviewQueue!({}).items[0]?.agentReview?.reason).toBe("REVIEW_PREFERENCE_CHANGED");
   });
 });
+
+describe("read-only classification diagnostics",() => {
+  it("distinguishes recorded Jev confidence from category probabilities throughout queue, detail and snapshot",async () => {
+    const f = fixture();
+    // Realistic nine-way provider calibration: winning probability .90 yields
+    // approximately .89 recorded confidence, so the existing .90 gate still holds.
+    f.classifier.classify = async () => ({...decision("NEWSLETTER",0.89),probabilities:Object.fromEntries(CATEGORIES.map(category => [category,category === "NEWSLETTER" ? 0.90 : 0.0125])) as Decision["probabilities"]});
+    const [item] = await f.seed();
+    const before = f.db.prepare("SELECT json FROM triage_work WHERE id=?").get(item!.id)!.json;
+    const expected = {provider:"jev",model:"jev-1.13.0",category:"NEWSLETTER",confidence:0.89,probabilities:{NEWSLETTER:0.90},minimumConfidence:0.90};
+    expect(f.service.reviewQueue!({}).items[0]?.classification).toMatchObject(expected);
+    expect(f.service.snapshot().reviews[0]?.classification).toMatchObject(expected);
+    expect((await f.service.reviewDetail!(item!.id)).item.classification).toMatchObject(expected);
+    expect(f.db.prepare("SELECT json FROM triage_work WHERE id=?").get(item!.id)!.json).toBe(before);
+    expect(f.mail.mutations).toHaveLength(0); expect(f.counts()).toBe(0);
+  });
+  it("leaves historical Claude scores and flags unrecorded rather than inferring them",async () => {
+    const f = fixture(), [item] = await f.seed(), store = new AutomationStore(f.db);
+    store.saveReview(store.reviewKey(item!.id,item!.revision!,"lifeos-review-v1"),{id:item!.id,account,category:null,revision:item!.revision!,policyVersion:"lifeos-review-v1",state:"held",model:"claude-sonnet-5-5",reason:"Ambiguous earlier request",createdAt:"2026-10-20T12:00:00Z"});
+    const summary = f.service.reviewQueue!({}).items[0]?.agentReview;
+    expect(summary).toMatchObject({category:null,source:"claude",minimumConfidence:0.95,reason:"Ambiguous earlier request"});
+    for (const key of ["confidence","clear","needsMoreContext","gateReason"]) expect(summary).not.toHaveProperty(key);
+    expect((await f.service.reviewDetail!(item!.id)).item.agentReview).toEqual(summary);
+    expect(f.service.snapshot().reviews[0]?.agentReview).toEqual(summary);
+  });
+  it("never attributes later human or Claude decisions to Jev and filters unsafe probability keys",async () => {
+    const f = fixture(), [item] = await f.seed(), work = f.store.work(item!.id)!;
+    work.decision!.probabilities = {...work.decision!.probabilities,"ACTION/NOW":NaN,"ACTION/SOON":2,unknown:0.5} as Decision["probabilities"]; f.store.saveWork(work);
+    const probabilities = f.jobs.reviews()[0]!.classification!.probabilities;
+    expect(probabilities).not.toHaveProperty("ACTION/NOW"); expect(probabilities).not.toHaveProperty("ACTION/SOON"); expect(probabilities).not.toHaveProperty("unknown"); expect(Object.keys(probabilities).length).toBeLessThanOrEqual(9);
+    for (const model of ["human","claude-sonnet-5-5"]) { work.decision = {...decision(),model,confidence:1}; f.store.saveWork(work); expect(f.jobs.reviews()[0]).not.toHaveProperty("classification"); }
+    delete work.decision; f.store.saveWork(work); expect(f.jobs.reviews()[0]).not.toHaveProperty("classification");
+  });
+  it.each([
+    {confidence:0.94,clear:true,needsMoreContext:false,category:"ACTION/NOW" as const,gateReason:"below_threshold"},
+    {confidence:0.99,clear:false,needsMoreContext:false,category:"ACTION/NOW" as const,gateReason:"not_clear"},
+    {confidence:0.99,clear:true,needsMoreContext:true,category:"ACTION/NOW" as const,gateReason:"needs_context"},
+    {confidence:0.99,clear:true,needsMoreContext:false,category:null,gateReason:"no_category"},
+  ])("records a new Claude hold caused by $gateReason without applying or inventing uncertainty",async flags => {
+    const f = fixture(); await f.seed(); const review = f.provider.review;
+    f.provider.review = async (...args) => { const result = await review(...args); const {gateReason:_reason,...values} = flags; return {...result,value:{...result.value,...values}}; };
+    await f.service.command("automation.run",{kind:"review"},"agent-diag-001",account); await f.service.tick();
+    expect(f.service.reviewQueue!({}).items[0]?.agentReview).toMatchObject({...flags,source:"claude",minimumConfidence:0.95});
+    expect(new AutomationStore(f.db).decisions()[0]).toMatchObject(flags);
+    expect(f.mail.mutations).toHaveLength(0); expect(f.counts()).toBe(1);
+  });
+  it("reports policy failures separately without claiming that Claude produced a score",async () => {
+    const f = fixture(), [item] = await f.seed(); f.mail.data.get("a")!.messages[0]!.labels.push("STARRED");
+    await f.service.command("automation.run",{kind:"review"},"agent-diag-001",account); await f.service.tick();
+    const review = f.service.reviewQueue!({}).items[0]?.agentReview;
+    expect(review).toMatchObject({source:"policy",model:"policy",gateReason:"policy_error",reason:"REVIEW_EVIDENCE_CHANGED",minimumConfidence:0.95});
+    expect(review).not.toHaveProperty("confidence"); expect(review).not.toHaveProperty("clear"); expect(review).not.toHaveProperty("needsMoreContext");
+    expect(f.store.work(item!.id)?.state).toBe("needs_review"); expect(f.counts()).toBe(0); expect(f.mail.mutations).toHaveLength(0);
+  });
+  it("identifies a post-acceptance Gmail precondition hold as policy while retaining the original model score",async () => {
+    const f = fixture(), [item] = await f.seed(); let reads = 0;
+    f.mail.onRead = () => { if (++reads === 3) f.mail.data.get("a")!.messages[0]!.labels.push("STARRED"); };
+    await f.service.command("automation.run",{kind:"review"},"agent-diag-001",account); await f.service.tick();
+    expect(f.mail.mutations).toHaveLength(0); expect(f.store.work(item!.id)?.state).toBe("needs_review");
+    expect(new AutomationStore(f.db).decisions()[0]).toMatchObject({state:"held",model:"claude-sonnet-5-5",confidence:0.99,gateReason:"policy_error"});
+    expect(f.service.reviewQueue!({}).items[0]?.agentReview).toMatchObject({source:"policy",model:"claude-sonnet-5-5",confidence:0.99,clear:true,needsMoreContext:false,gateReason:"policy_error",reason:"Evidence changed or mutation needs reconciliation."});
+  });
+  it.each([0.899,0.9])("keeps the existing Jev threshold unchanged at confidence %s",async confidence => {
+    const f = fixture(); f.classifier.classify = async () => decision("NEWSLETTER",confidence); await f.seed();
+    expect(f.mail.mutations).toHaveLength(confidence < 0.9 ? 0 : 1);
+  });
+  it("accepts Claude at exactly the existing .95 gate and persists its recorded flags",async () => {
+    const f = fixture(); await f.seed(); const review = f.provider.review;
+    f.provider.review = async (...args) => { const result = await review(...args); result.value.confidence = 0.95; return result; };
+    await f.service.command("automation.run",{kind:"review"},"agent-diag-001",account); await f.service.tick();
+    expect(f.mail.mutations).toHaveLength(1);
+    expect(new AutomationStore(f.db).decisions()[0]).toMatchObject({state:"applied",confidence:0.95,clear:true,needsMoreContext:false,gateReason:"accepted"});
+  });
+});
