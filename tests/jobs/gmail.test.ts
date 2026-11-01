@@ -17,7 +17,7 @@ describe("Gmail job gateway", () => {
     expect(calls).toEqual([undefined, "page2"]);
   });
   it("recovers a label creation race by re-reading the label list", async () => {
-    const labels = [...CATEGORIES, "ACTION/DONE"].filter((name) => name !== "WAITING").map((name) => ({ name, id: `Label_${name}` }));
+    const labels = [...CATEGORIES, "ACTION/DONE", "Uncertain"].filter((name) => name !== "WAITING").map((name) => ({ name, id: `Label_${name}` }));
     let creates = 0;
     const gmail = { users: { labels: { list: async () => ({ data: { labels } }), create: async () => { creates++; labels.push({ name: "WAITING", id: "concurrently-created" }); throw new Error("Already exists"); } } } };
     const gateway = new GmailJobGateway(loadConfig(), logger, manager(gmail));

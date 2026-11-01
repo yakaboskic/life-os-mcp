@@ -2,6 +2,7 @@ import type { LifeOsConfig } from "../core/config.js";
 import type { Logger } from "../core/logger.js";
 import { GmailAccountManager, type GmailManagerLike } from "../toolsets/gmail/client.js";
 import { getHeader, parseMessage } from "../toolsets/gmail/mime.js";
+import { UNCERTAIN_LABEL } from "./policy.js";
 import { CATEGORIES, type MailGateway, type MailThread, type MutationPlan } from "./types.js";
 
 export class GmailJobGateway implements MailGateway {
@@ -26,7 +27,7 @@ export class GmailJobGateway implements MailGateway {
       let labels = await list();
       const result: Record<string, string> = Object.fromEntries(labels.filter((label) => label.id && label.name).map((label) => [label.name!, label.id!]));
       if (!create) return result;
-      for (const name of [...CATEGORIES, "ACTION/DONE"]) {
+      for (const name of [...CATEGORIES, "ACTION/DONE", UNCERTAIN_LABEL]) {
         if (result[name]) continue;
         signal.throwIfAborted();
         try {

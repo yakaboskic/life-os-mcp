@@ -7,13 +7,13 @@ import { closeDatabase, openDatabase } from "../../src/state/database.js";
 import { TrackStore } from "../../src/toolsets/track/store.js";
 import { createAutomationService } from "../../src/automation/service.js";
 import { AutomationStore, automationLimits, LIMITS } from "../../src/automation/store.js";
-import type { AutomationProvider, BriefDeliveryGateway, BriefProposal } from "../../src/automation/types.js";
+import { AUTOMATION_POLICY, type AutomationProvider, type BriefDeliveryGateway, type BriefProposal } from "../../src/automation/types.js";
 import type { AgentReviewContext, AgentReviewProposal, JobRun, JobService, ReviewItem } from "../../src/jobs/types.js";
 const logger = { info() {}, warn() {}, error() {}, debug() {} };
 const owner = "owner@example.com", revision = "a".repeat(64);
 const dirs: ReturnType<typeof loadConfig>[] = [];
 const run = (id = "triage1"): JobRun => ({ id, name: "gmail-triage", mode: "apply", scheduled: true, day: "2026-10-18", state: "partial", startedAt: "2026-10-18T09:53:00Z", finishedAt: "2026-10-18T10:00:00Z", accounts: [{ account: owner, state: "partial", processed: 1, held: 1, failed: 0, completed: 0 }] });
-const context = (id: string): AgentReviewContext => ({ itemId: id, revision, policyVersion: "lifeos-review-v1", account: owner, now: "2026-10-18T10:10:00Z", triggerIds: ["m1"], thread: { id: "thread1", messages: [{ id: "m1", internalDate: 1, labels: ["INBOX"], from: "sender@example.com", to: owner, subject: "Action", body: "Please review the proposal today.", truncated: false, attachments: false }] } });
+const context = (id: string): AgentReviewContext => ({ itemId: id, revision, policyVersion: AUTOMATION_POLICY, account: owner, now: "2026-10-18T10:10:00Z", triggerIds: ["m1"], thread: { id: "thread1", messages: [{ id: "m1", internalDate: 1, labels: ["INBOX"], from: "sender@example.com", to: owner, subject: "Action", body: "Please review the proposal today.", truncated: false, attachments: false }] } });
 function fixture(env: Record<string, string> = {}) {
   const config = loadConfig({ LIFE_OS_HOME: mkdtempSync(join(tmpdir(), "lifeos-automation-")), LIFE_OS_BRIEF_ACCOUNT: owner, LIFE_OS_BRIEF_RECIPIENT: owner, ...env }); dirs.push(config);
   let now = new Date("2026-10-18T11:10:00Z"), paused = false;
@@ -49,6 +49,20 @@ describe("durable automation", () => {
     const f = fixture(); f.clear(false);
     for (const id of ["request-001", "request-002"]) { await f.service.command("automation.run", { kind: "review" }, id, "owner"); await f.service.tick(); }
     expect(f.counts().reviewCalls).toBe(1); expect(f.applied).toHaveLength(0); expect(f.reviews).toHaveLength(1);
+  });
+  it("reconsiders a historical hold once under the new policy without resetting usage or rewriting history", async () => {
+    const f = fixture(), store = new AutomationStore(openDatabase(f.config));
+    const oldKey = store.reviewKey("work1", revision, "lifeos-review-v1");
+    const old = { id: "work1", account: owner, category: "ACTION/NOW", revision, policyVersion: "lifeos-review-v1", state: "held" as const, model: "claude-sonnet-5-5", reason: "Earlier confidence hold", confidence: 0.7, clear: false, needsMoreContext: false, gateReason: "below_threshold" as const, createdAt: "2026-10-17T12:00:00Z" };
+    store.saveReview(oldKey, old); store.reserve("2026-10-18", 100, 50, "review");
+    expect(f.service.reviewQueue!({}).items[0]).toMatchObject({ bucket: "awaitingAgent", agentReview: { policyVersion: "lifeos-review-v1", decisionPolicy: "confidence-threshold", minimumConfidence: 0.95 } });
+    const review = f.provider.review;
+    f.provider.review = async (...args) => { const result = await review(...args); result.value.confidence = 0.6; result.value.clear = false; return result; };
+    for (const requestId of ["policy-001", "policy-002"]) { await f.service.command("automation.run", { kind: "review" }, requestId, "owner"); await f.service.tick(); }
+    expect(f.counts().reviewCalls).toBe(1); expect(f.applied).toEqual([["work1"]]); expect(f.service.snapshot().usage.reviewCalls).toBe(2);
+    expect(store.reviewRecord(oldKey)).toEqual(old);
+    expect(store.reviewRecord(store.reviewKey("work1", revision, AUTOMATION_POLICY))).toMatchObject({ state: "applied", decisionPolicy: "best-fit", confidence: 0.6, clear: false, policyVersion: "best-fit-v2" });
+    expect(f.service.snapshot().recentDecisions?.find(record => record.state === "applied")).not.toHaveProperty("minimumConfidence");
   });
   it("manual human review queues only its accepted work, without a model call", async () => {
     const f = fixture(); await f.service.command("review.resolve", { itemId: "work1", category: "ACTION/SOON" }, "request-001", "owner"); await f.service.tick();
@@ -213,5 +227,104 @@ describe("durable automation", () => {
     expect(automationLimits({})).toEqual(LIMITS);
     for (const [name, value] of Object.entries({ LIFE_OS_REVIEW_MAX_PER_DAY: "101", LIFE_OS_AUTOMATION_MAX_CALLS: "102", LIFE_OS_AUTOMATION_MAX_INPUT_TOKENS: "1000001", LIFE_OS_AUTOMATION_MAX_OUTPUT_TOKENS: "100001" })) expect(() => automationLimits({ [name]: value })).toThrow("AUTOMATION_LIMIT_INVALID");
     for (const value of ["0", "-1", "NaN", "1.5", "", "100garbage"]) expect(() => automationLimits({ LIFE_OS_REVIEW_MAX_PER_DAY: value })).toThrow("AUTOMATION_LIMIT_INVALID");
+  });
+});
+
+function parkingFixture(total = 1) {
+  const f = fixture({ ...catchup, LIFE_OS_AUTOMATION_ENABLED: "true", LIFE_OS_TRIAGE_APPLY_ENABLED: "true" }); addReviews(f, total);
+  const store = new AutomationStore(openDatabase(f.config), automationLimits(f.config.env));
+  store.setSettings({ ...store.settings(), enabled: true, reviewEnabled: true, localTime: "23:59" });
+  f.reviews.forEach(item => { item.uncertainFiling = { state: "pending", label: "Uncertain" }; });
+  f.provider.configured = () => false;
+  const batches: string[][] = [];
+  f.jobs.fileUncertain = async ids => {
+    batches.push(ids);
+    f.reviews.filter(item => ids.includes(item.id)).forEach(item => { item.uncertainFiling = { state: "filed", label: "Uncertain", filedAt: "2026-10-18T11:10:00Z" }; });
+    return { filed: ids.length, failed: 0 };
+  };
+  return { ...f, store, batches };
+}
+
+describe("bounded Uncertain filing maintenance", () => {
+  it("files a726-item backlog in bounded batches before provider and quota checks, persisting cooldown across restart", async () => {
+    const f = parkingFixture(726);
+    for (let i = 0; i < 100; i++) f.store.reserve("2026-10-18", 1, 1, "review");
+    await f.service.tick(); expect(f.batches.map(ids => ids.length)).toEqual([100]);
+    const restarted = createAutomationService(f.config, logger, f.deps); await restarted.tick(); expect(f.batches).toHaveLength(1);
+    for (let i = 0; i < 7; i++) { f.advance(60_000); await restarted.tick(); }
+    expect(f.batches.map(ids => ids.length)).toEqual([100, 100, 100, 100, 100, 100, 100, 26]);
+    expect(new Set(f.batches.flat()).size).toBe(726);
+    f.advance(60_000); await restarted.tick(); expect(f.batches).toHaveLength(8);
+    expect(f.counts()).toMatchObject({ reviewCalls: 0, briefCalls: 0, sends: 0 });
+    expect(restarted.snapshot().usage.reviewCalls).toBe(100);
+  });
+  it.each(["disabled", "reviews-disabled", "apply-disabled", "paused"])("does not mutate while%s", async setting => {
+    const f = parkingFixture();
+    if (setting === "disabled") f.store.setSettings({ ...f.store.settings(), enabled: false });
+    if (setting === "reviews-disabled") f.store.setSettings({ ...f.store.settings(), reviewEnabled: false });
+    if (setting === "apply-disabled") f.config.env.LIFE_OS_TRIAGE_APPLY_ENABLED = "false";
+    if (setting === "paused") await f.service.drain();
+    await f.service.tick(); expect(f.batches).toHaveLength(0);
+  });
+  it("skips terminal states, unconfigured/dry-run items and pending human decisions", async () => {
+    const f = parkingFixture(6);
+    f.reviews[0]!.uncertainFiling!.state = "blocked";
+    f.reviews[1]!.uncertainFiling!.state = "filed";
+    f.reviews[2]!.account = "not-configured@example.com";
+    f.reviews[3]!.mode = "dry-run";
+    f.store.db.prepare("INSERT INTO automation_human_review_intents VALUES(?,?)").run(f.reviews[4]!.id, "human-pending");
+    await f.service.tick(); expect(f.batches).toEqual([[f.reviews[5]!.id]]);
+  });
+  it("backs off returned failures across restart and rotates past failing items", async () => {
+    const f = parkingFixture(205);
+    f.jobs.fileUncertain = async ids => { f.batches.push(ids); return { filed: 0, failed: ids.length }; };
+    await f.service.tick(); expect(f.store.uncertainMaintenance()?.failures).toBe(1);
+    const restarted = createAutomationService(f.config, logger, f.deps);
+    f.advance(59_999); await restarted.tick(); expect(f.batches).toHaveLength(1);
+    f.advance(1); await restarted.tick(); expect(f.store.uncertainMaintenance()?.failures).toBe(2);
+    expect(f.batches[1]!.some(id => f.batches[0]!.includes(id))).toBe(false);
+    f.advance(60_000); await restarted.tick(); expect(f.batches).toHaveLength(2);
+    f.advance(60_000); await restarted.tick(); expect(f.batches).toHaveLength(3);
+    expect(new Set(f.batches.flat()).size).toBe(205); expect(f.counts().reviewCalls).toBe(0);
+  });
+  it("keeps the one-minute cadence when mixed batches file mail and permanently block other items", async () => {
+    const f = parkingFixture(205);
+    f.store.saveUncertainMaintenance({ nextAttemptAt: "2026-10-18T10:00:00Z", failures: 5 });
+    f.jobs.fileUncertain = async ids => {
+      f.batches.push(ids);
+      ids.forEach((id, index) => { f.reviews.find(item => item.id === id)!.uncertainFiling = { state: index === 0 ? "filed" : "blocked", label: "Uncertain" }; });
+      return { filed: 1, failed: ids.length - 1 };
+    };
+    await f.service.tick();
+    expect(f.store.uncertainMaintenance()).toMatchObject({ failures: 0, nextAttemptAt: "2026-10-18T11:11:00.000Z" });
+    const restarted = createAutomationService(f.config, logger, f.deps);
+    f.advance(59_999); await restarted.tick(); expect(f.batches).toHaveLength(1);
+    f.advance(1); await restarted.tick(); f.advance(60_000); await restarted.tick();
+    expect(f.batches.map(ids => ids.length)).toEqual([100, 100, 5]);
+    expect(new Set(f.batches.flat()).size).toBe(205);
+    f.advance(60_000); await restarted.tick(); expect(f.batches).toHaveLength(3);
+    expect(f.store.uncertainMaintenance()?.failures).toBe(0);
+  });
+  it("aborts parking on drain and waits for its cleanup without starting queued model work", async () => {
+    const f = parkingFixture(); f.provider.configured = () => true;
+    await f.service.command("automation.run", { kind: "review" }, "request-park-001", "owner");
+    let entered!: () => void; const started = new Promise<void>(resolve => { entered = resolve; });
+    f.jobs.fileUncertain = async (_ids, signal) => { entered(); await new Promise<void>((_resolve, reject) => signal!.addEventListener("abort", () => reject(new Error("ABORTED")), { once: true })); throw Error("unreachable"); };
+    const active = f.service.tick(); await started; expect(f.service.activeCount).toBe(1);
+    await f.service.drain(); await active;
+    expect(f.service.activeCount).toBe(0); expect(f.counts().reviewCalls).toBe(0); expect(f.service.snapshot().runs[0]?.state).toBe("queued");
+  });
+  it("continues a queued brief after a failed parking batch", async () => {
+    const f = parkingFixture(); f.provider.configured = () => true;
+    f.jobs.fileUncertain = async () => { throw Error("GMAIL_HTTP_503"); };
+    await f.service.command("automation.run", { kind: "brief" }, "request-brief-001", "owner"); await f.service.tick();
+    expect(f.store.uncertainMaintenance()?.failures).toBe(1);
+    expect(f.counts()).toMatchObject({ sends: 1, briefCalls: 1, reviewCalls: 0 });
+  });
+  it("keeps a null-category conversation filed under Uncertain without repeatedly spending on the same version", async () => {
+    const f = parkingFixture(); f.provider.configured = () => true; f.clear(false);
+    for (const requestId of ["request-null-001", "request-null-002"]) { await f.service.command("automation.run", { kind: "review" }, requestId, "owner"); await f.service.tick(); }
+    expect(f.batches).toEqual([["work1"]]); expect(f.counts().reviewCalls).toBe(1); expect(f.applied).toHaveLength(0);
+    expect(f.service.reviewQueue!({}).items[0]).toMatchObject({ uncertainFiling: { state: "filed", label: "Uncertain" }, agentReview: { category: null, decisionPolicy: "best-fit", gateReason: "needs_context" } });
   });
 });

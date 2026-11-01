@@ -210,15 +210,14 @@ describe("read-only classification diagnostics",() => {
     delete work.decision; f.store.saveWork(work); expect(f.jobs.reviews()[0]).not.toHaveProperty("classification");
   });
   it.each([
-    {confidence:0.94,clear:true,needsMoreContext:false,category:"ACTION/NOW" as const,gateReason:"below_threshold"},
-    {confidence:0.99,clear:false,needsMoreContext:false,category:"ACTION/NOW" as const,gateReason:"not_clear"},
     {confidence:0.99,clear:true,needsMoreContext:true,category:"ACTION/NOW" as const,gateReason:"needs_context"},
     {confidence:0.99,clear:true,needsMoreContext:false,category:null,gateReason:"no_category"},
   ])("records a new Claude hold caused by $gateReason without applying or inventing uncertainty",async flags => {
     const f = fixture(); await f.seed(); const review = f.provider.review;
     f.provider.review = async (...args) => { const result = await review(...args); const {gateReason:_reason,...values} = flags; return {...result,value:{...result.value,...values}}; };
     await f.service.command("automation.run",{kind:"review"},"agent-diag-001",account); await f.service.tick();
-    expect(f.service.reviewQueue!({}).items[0]?.agentReview).toMatchObject({...flags,source:"claude",minimumConfidence:0.95});
+    expect(f.service.reviewQueue!({}).items[0]?.agentReview).toMatchObject({...flags,source:"claude",decisionPolicy:"best-fit",policyVersion:"best-fit-v2"});
+    expect(f.service.reviewQueue!({}).items[0]?.agentReview).not.toHaveProperty("minimumConfidence");
     expect(new AutomationStore(f.db).decisions()[0]).toMatchObject(flags);
     expect(f.mail.mutations).toHaveLength(0); expect(f.counts()).toBe(1);
   });
@@ -226,7 +225,8 @@ describe("read-only classification diagnostics",() => {
     const f = fixture(), [item] = await f.seed(); f.mail.data.get("a")!.messages[0]!.labels.push("STARRED");
     await f.service.command("automation.run",{kind:"review"},"agent-diag-001",account); await f.service.tick();
     const review = f.service.reviewQueue!({}).items[0]?.agentReview;
-    expect(review).toMatchObject({source:"policy",model:"policy",gateReason:"policy_error",reason:"REVIEW_EVIDENCE_CHANGED",minimumConfidence:0.95});
+    expect(review).toMatchObject({source:"policy",model:"policy",gateReason:"policy_error",reason:"REVIEW_EVIDENCE_CHANGED",decisionPolicy:"best-fit"});
+    expect(review).not.toHaveProperty("minimumConfidence");
     expect(review).not.toHaveProperty("confidence"); expect(review).not.toHaveProperty("clear"); expect(review).not.toHaveProperty("needsMoreContext");
     expect(f.store.work(item!.id)?.state).toBe("needs_review"); expect(f.counts()).toBe(0); expect(f.mail.mutations).toHaveLength(0);
   });
@@ -242,11 +242,13 @@ describe("read-only classification diagnostics",() => {
     const f = fixture(); f.classifier.classify = async () => decision("NEWSLETTER",confidence); await f.seed();
     expect(f.mail.mutations).toHaveLength(confidence < 0.9 ? 0 : 1);
   });
-  it("accepts Claude at exactly the existing .95 gate and persists its recorded flags",async () => {
+  it.each([0,0.6,0.94])("applies a supported Claude category with confidence%s and clear=false under best-fit policy",async confidence => {
     const f = fixture(); await f.seed(); const review = f.provider.review;
-    f.provider.review = async (...args) => { const result = await review(...args); result.value.confidence = 0.95; return result; };
+    f.provider.review = async (...args) => { const result = await review(...args); result.value.confidence = confidence; result.value.clear = false; return result; };
     await f.service.command("automation.run",{kind:"review"},"agent-diag-001",account); await f.service.tick();
     expect(f.mail.mutations).toHaveLength(1);
-    expect(new AutomationStore(f.db).decisions()[0]).toMatchObject({state:"applied",confidence:0.95,clear:true,needsMoreContext:false,gateReason:"accepted"});
+    expect(new AutomationStore(f.db).decisions()[0]).toMatchObject({state:"applied",confidence,clear:false,needsMoreContext:false,gateReason:"accepted",decisionPolicy:"best-fit",policyVersion:"best-fit-v2"});
+    await f.service.command("automation.run",{kind:"review"},"agent-diag-002",account); await f.service.tick();
+    expect(f.mail.mutations).toHaveLength(1); expect(f.counts()).toBe(1);
   });
 });

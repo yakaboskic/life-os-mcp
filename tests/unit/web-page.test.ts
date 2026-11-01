@@ -33,7 +33,7 @@ describe("dashboard source rendering", () => {
     });
     const html = $("review-queue").innerHTML;
     expect(html).toContain("781 held"); expect(html).toContain("Showing 1 of 781");
-    expect(html).toContain("500 awaiting Claude review"); expect(html).toContain("151 need your decision"); expect(html).toContain("130 need more context");
+    expect(html).toContain("500 awaiting Claude review"); expect(html).toContain("151 unresolved"); expect(html).toContain("130 incomplete context");
   });
   it("ships a syntactically valid standalone browser script", () => {
     expect(() => new Function(script)).not.toThrow();

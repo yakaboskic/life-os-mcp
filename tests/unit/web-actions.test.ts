@@ -66,8 +66,8 @@ describe("dashboard action requests", () => {
     const decision = { category: null, reason: '<img src=x onerror="bad()">', model: 'claude-"test', account: "owner@example.com", state: "held" };
     expect(reviewRationale(undefined)).toContain("No Claude review is recorded for this version");
     const rationale = reviewRationale(decision);
-    expect(rationale).toContain("No clear category");
-    expect(rationale).toContain("Choose the category you want to apply");
+    expect(rationale).toContain("No usable category");
+    expect(rationale).toContain("You can optionally correct the category");
     expect(rationale).toContain("&lt;img src=x onerror=&quot;bad()&quot;&gt;");
     expect(rationale).not.toContain("<img");
     expect(decisionHistory(undefined, false)).toBe("");

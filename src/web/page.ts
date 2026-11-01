@@ -486,7 +486,7 @@ export const PORTAL_HTML = `<!doctype html>
     <div class="system-cell"><span class="system-label">Connection</span><span class="system-value" id="connection-state" role="status">Connecting…</span></div>
     <div class="system-cell"><span class="system-label">Last successful triage</span><span class="system-value" id="last-job">Loading…</span></div>
     <div class="system-cell"><span class="system-label">Next Gmail triage</span><span class="system-value" id="next-job">Loading…</span></div>
-    <div class="system-cell"><span class="system-label">Needs review</span><span class="system-value" id="attention-count">Loading…</span></div>
+    <div class="system-cell"><span class="system-label">Pending / unresolved</span><span class="system-value" id="attention-count">Loading…</span></div>
   </div>
   <main id="main-content" tabindex="-1">
   <div id="session-notice" class="session-notice" hidden>Sign in again to continue. <a href="/auth/login" target="_blank" rel="noopener">Sign in with Google</a><button id="refresh-connection" class="quiet-button" type="button">I’ve signed in · refresh</button></div>
@@ -548,15 +548,15 @@ export const PORTAL_HTML = `<!doctype html>
 
   <div id="view-triage" hidden>
     <section><h2>Gmail operations</h2>
-      <p class="section-intro">Scheduled triage, account health, and decisions awaiting review.</p>
+      <p class="section-intro">Automatic email filing, account health, and optional corrections.</p>
       <div id="job-operations" class="operations-panel panel"><p class="mutetext">Loading job status…</p></div>
       <section id="review-queue" hidden></section>
       <section id="review-workspace" aria-labelledby="review-heading" hidden>
-        <div class="portfolio-heading"><div><h2 id="review-heading">Review inbox</h2><p class="mutetext">Inspect held conversations and choose what happens next.</p></div><span class="chip" id="review-total"></span></div>
+        <div class="portfolio-heading"><div><h2 id="review-heading">Email filing</h2><p class="mutetext">Claude chooses the best-fit category automatically. Pending and unresolved mail is moved to Gmail’s Uncertain label; corrections here are optional.</p></div><span class="chip" id="review-total"></span></div>
         <p id="review-backlog" class="automation-detail"></p>
         <form id="review-search-form" class="review-filters">
           <div class="form-field"><label for="review-search">Search sender or conversation</label><input id="review-search" name="search" type="search" maxlength="200" placeholder="Name, address, subject or words" autocomplete="off"></div>
-          <div class="form-field"><label for="review-bucket">Review status</label><select id="review-bucket" name="bucket"><option value="all">All held conversations</option><option value="awaitingAgent">Awaiting Claude</option><option value="needsDecision">Needs your decision</option><option value="needsContext">Needs more context</option><option value="queued">Queued for changes</option></select></div>
+          <div class="form-field"><label for="review-bucket">Review status</label><select id="review-bucket" name="bucket"><option value="all">Pending and unresolved</option><option value="awaitingAgent">Awaiting Claude</option><option value="needsDecision">Unresolved · optional review</option><option value="needsContext">Incomplete context</option><option value="queued">Queued for changes</option></select></div>
           <div class="form-field"><label for="review-account">Gmail account</label><select id="review-account" name="account"><option value="">All accounts</option></select></div>
           <div class="form-field"><label for="review-category">Suggested category</label><select id="review-category" name="category"><option value="">All categories</option></select></div>
           <div class="review-filter-actions"><button class="quiet-button" type="submit">Search queue</button><button class="text-button" id="review-reset" type="button">Reset filters</button><p>Searches the full queue. Up to 50 conversations per page.</p></div>
@@ -1176,11 +1176,11 @@ export const PORTAL_HTML = `<!doctype html>
     $("job-operations").innerHTML = "<div class='operations-top'><div><h3>Gmail triage</h3><p>" + scheduleCopy + "</p></div>" +
       (latest ? jobBadge(latest.status) : "<span class='job-state'>Awaiting first run</span>") + "</div>" +
       "<dl class='job-summary'><div><dt>Latest run</dt><dd>" + (latest ? jobTime(latest.startedAt) : "No run recorded") + "</dd></div>" +
-      "<div><dt>Mode</dt><dd>" + (latest ? esc(latest.mode || "Unknown") : "—") + "</dd></div>" +
+      "<div><dt>Mode</dt><dd>" + (latest ? (latest.uncertainIds ? "Uncertain filing" : esc(latest.mode || "Unknown")) : "—") + "</dd></div>" +
       "<div><dt>Held conversations</dt><dd>" + reviews + "</dd></div></dl>" + accountsTable +
-      (reviews ? "<p class='mutetext' style='font-size:12px; margin-top:14px'>Held messages remain in your inbox. Claude reviews eligible conversations; uncertain decisions remain available below for your review.</p>" : "") +
+      (reviews ? "<p class='mutetext' style='font-size:12px; margin-top:14px'>Claude files best-fit categories automatically. Pending and unresolved messages move to Uncertain; each conversation below shows its filing status.</p>" : "") +
       (runs.length ? "<details class='job-history'><summary>Run history · " + runs.length + "</summary><div class='tablewrap'><table><thead><tr><th>Started</th><th>Mode</th><th>Status</th><th>Finished</th></tr></thead><tbody>" +
-        runs.map((r) => "<tr><td>" + jobTime(r.startedAt) + "</td><td>" + esc(r.mode || "Unknown") + "</td><td>" + jobBadge(r.status) + "</td><td>" +
+        runs.map((r) => "<tr><td>" + jobTime(r.startedAt) + "</td><td>" + (r.uncertainIds ? "Uncertain filing" : esc(r.mode || "Unknown")) + "</td><td>" + jobBadge(r.status) + "</td><td>" +
           (r.finishedAt ? jobTime(r.finishedAt) : "—") + "</td></tr>").join("") + "</tbody></table></div></details>" : "");
     if (!jobsAvailable) {
       $("job-operations").insertAdjacentHTML("afterbegin", "<p class='mutetext' style='margin-bottom:16px'>Job status is stale. Showing the last received records; retrying automatically.</p>");
@@ -1588,38 +1588,46 @@ export const PORTAL_HTML = `<!doctype html>
     return typeof threshold === 'number' && value < threshold && rounded >= threshold * 100 ? '<' + Number((threshold * 100).toFixed(2)) + '%' : rounded + '%';
   }
   function reviewIsPolicy(review) { return review?.source === 'policy' || review?.model === 'policy'; }
+  function reviewFilingText(item) {
+    const filing = item.uncertainFiling;
+    if (filing?.state === 'filed') return 'Filed in Gmail / Uncertain. Reviewing it is optional.';
+    if (filing?.state === 'pending') return 'Automatic filing to Gmail / Uncertain is pending.';
+    if (filing?.state === 'blocked') return 'Automatic filing could not be confirmed safely. ' + reviewOutcomeText(filing.reason);
+    return 'Automatic filing status has not been recorded yet.';
+  }
   function reviewHoldText(item) {
     if (item.reason !== 'LOW_CONFIDENCE') return reviewOutcomeText(item.reason);
     const classification = item.classification;
     const confidence = reviewPercent(classification?.confidence, classification?.minimumConfidence), threshold = reviewPercent(classification?.minimumConfidence);
-    return confidence && threshold ? 'Jev confidence ' + confidence + '; automatic filing currently requires at least ' + threshold + '.' : 'Classifier confidence was below the automatic-filing threshold. Classification diagnostics are not available here.';
+    return confidence && threshold ? 'Jev confidence ' + confidence + '; direct filing by Jev requires at least ' + threshold + '.' : 'Classifier confidence was below the automatic-filing threshold. Classification diagnostics are not available here.';
   }
   function reviewSuggestions(item) {
     const classification = item.classification, review = item.agentReview;
     const initial = classification?.category ? '<p class="review-suggestion">Jev suggested: ' + esc(classification.category) + '</p>' : item.category ? '<p class="review-suggestion">Recorded category: ' + esc(item.category) + '</p>' : '';
-    const subsequent = reviewIsPolicy(review) ? 'Review blocked by policy' : review ? 'Claude proposal: ' + (review.category || 'No clear category') : 'No Claude review recorded for this version';
-    return initial + '<p class="review-suggestion">' + esc(subsequent) + '</p>';
+    const subsequent = reviewIsPolicy(review) ? 'Review blocked by policy' : review ? 'Claude proposal: ' + (review.category || 'No usable category') : 'No Claude review recorded for this version';
+    return initial + '<p class="review-suggestion">' + esc(subsequent) + '</p><p class="review-suggestion">' + esc(reviewFilingText(item)) + '</p>';
   }
   function reviewDiagnostics(item) {
     const classification = item.classification;
     const scores = classification?.probabilities && typeof classification.probabilities === 'object' ? Object.entries(classification.probabilities).filter(([category, value]) => REVIEW_CATEGORIES.includes(category) && reviewPercent(value) !== null).sort((a, b) => b[1] - a[1] || REVIEW_CATEGORIES.indexOf(a[0]) - REVIEW_CATEGORIES.indexOf(b[0])).slice(0, 3) : [];
-    const table = scores.length ? '<table class="review-score-table"><caption>Top recorded category probabilities</caption><thead><tr><th scope="col">Category</th><th scope="col">Probability</th></tr></thead><tbody>' + scores.map(([category, value]) => '<tr><th scope="row">' + esc(category) + '</th><td>' + esc(reviewPercent(value)) + '</td></tr>').join('') + '</tbody></table><p>Confidence summarizes the category probabilities and is separate from the selected category’s probability. Automatic filing checks the confidence.</p>' : '<p>Category probabilities were not recorded for this item.</p>';
-    return '<section class="review-context review-diagnostics" aria-label="Why held"><h3>Why held</h3><p class="review-hold-reason">' + esc(reviewHoldText(item)) + '</p>' +
+    const table = scores.length ? '<table class="review-score-table"><caption>Top recorded category probabilities</caption><thead><tr><th scope="col">Category</th><th scope="col">Probability</th></tr></thead><tbody>' + scores.map(([category, value]) => '<tr><th scope="row">' + esc(category) + '</th><td>' + esc(reviewPercent(value)) + '</td></tr>').join('') + '</tbody></table><p>Confidence summarizes the category probabilities and is separate from the selected category’s probability. Direct filing by Jev checks the confidence; Claude can still choose a best-fit category.</p>' : '<p>Category probabilities were not recorded for this item.</p>';
+    return '<section class="review-context review-diagnostics" aria-label="Why held"><h3>Why held</h3><p>' + esc(reviewFilingText(item)) + '</p><p class="review-hold-reason">' + esc(reviewHoldText(item)) + '</p>' +
       (classification ? '<p>Jev suggested: <strong>' + esc(classification.category) + '</strong></p><p>Model: ' + esc(classification.model) + '</p>' + (item.reason !== 'LOW_CONFIDENCE' ? '<p>Recorded Jev confidence: ' + esc(reviewPercent(classification.confidence) || 'not recorded') + '. Current confidence requirement: ' + esc(reviewPercent(classification.minimumConfidence) || 'not recorded') + '.</p>' : '') + table + '<p>Jev returned scores, not a written explanation.</p>' : '<p>' + (item.reason === 'INSUFFICIENT_OR_TRUNCATED_CONTEXT' ? 'The context check stopped classification before Jev produced a result.' : 'No original Jev classification details are available for this item.') + '</p>') + '</section>';
   }
   function reviewRationale(review) {
     if (!review) return '<div class="review-context review-rationale"><h3>Claude review</h3><p>No Claude review is recorded for this version of the conversation.</p></div>';
     if (reviewIsPolicy(review)) return '<div class="review-context review-rationale"><h3>Review blocked by policy</h3><p class="rationale-text">' + esc(reviewOutcomeText(review.reason)) + '</p><p>' + jobTime(review.createdAt) + '</p><p>This is a recorded policy check, not a Claude explanation.</p></div>';
-    const confidence = reviewPercent(review.confidence, review.minimumConfidence), threshold = reviewPercent(review.minimumConfidence);
-    const checks = { accepted: 'Claude confidence and clarity checks passed. This does not confirm Gmail changes.', needs_context: 'Claude requested more context.', not_clear: 'Claude did not mark the category as clear.', no_category: 'Claude did not choose a category.', below_threshold: 'Claude confidence did not meet the automatic-review requirement.' };
+    const confidence = reviewPercent(review.confidence, review.minimumConfidence), threshold = reviewPercent(review.minimumConfidence), bestFit = review.decisionPolicy === 'best-fit';
+    const checks = { accepted: bestFit ? 'Claude selected a best-fit category. Gmail changes are checked separately.' : 'Claude passed the previous confidence and clarity checks. This does not confirm Gmail changes.', needs_context: 'Claude requested more context.', not_clear: 'Claude did not mark the category as clear under the previous policy.', no_category: 'Claude could not choose a usable category.', below_threshold: 'Claude confidence did not meet the previous automatic-review requirement.' };
     const flags = typeof review.clear === 'boolean' && typeof review.needsMoreContext === 'boolean' ? '<p>Clear category: ' + (review.clear ? 'yes' : 'no') + '. More context requested: ' + (review.needsMoreContext ? 'yes' : 'no') + '.</p>' : '<p>The clear-category and context checks were not recorded for this review.</p>';
-    return '<div class="review-context review-rationale"><h3>Claude review</h3><p>Proposal: <strong>' + esc(review.category || 'No clear category') + '</strong></p><p class="rationale-text">' + esc(review.reason) + '</p>' +
-      '<p>' + (confidence ? 'Recorded confidence: ' + esc(confidence) + (threshold ? '; automatic review currently requires at least ' + esc(threshold) : '') + '.' : 'Confidence was not recorded for this review.') + '</p>' + flags +
-      (checks[review.gateReason] ? '<p>' + esc(checks[review.gateReason]) + '</p>' : '') + '<p>Model: ' + esc(review.model) + ' · ' + jobTime(review.createdAt) + '</p><p>Choose the category you want to apply.</p></div>';
+    return '<div class="review-context review-rationale"><h3>Claude review</h3><p>Proposal: <strong>' + esc(review.category || 'No usable category') + '</strong></p><p class="rationale-text">' + esc(review.reason) + '</p>' +
+      '<p>' + (confidence ? 'Recorded confidence: ' + esc(confidence) + (!bestFit && threshold ? '; this review used a ' + esc(threshold) + ' confidence requirement' : '') + '.' : 'Confidence was not recorded for this review.') + '</p>' +
+      (bestFit ? '<p>Best-fit filing: confidence is diagnostic, not an approval cutoff. Missing essential context stays in Uncertain.</p>' : '<p>This record used the previous review policy. Eligible conversations can be reconsidered automatically.</p>') + flags +
+      (checks[review.gateReason] ? '<p>' + esc(checks[review.gateReason]) + '</p>' : '') + '<p>Model: ' + esc(review.model) + ' · ' + jobTime(review.createdAt) + '</p><p>You can optionally correct the category.</p></div>';
   }
   function decisionHistory(decisions, open) {
     if (!Array.isArray(decisions) || !decisions.length) return '';
-    return '<details class="decision-history"' + (open ? ' open' : '') + '><summary>Recent classification decisions · ' + decisions.length + '</summary>' + decisions.slice(0, 20).map((decision) => '<div class="review-context review-rationale"><strong>' + esc(decision.category || 'No clear category') + ' · ' + esc(jobStatus(decision.state)) + '</strong><p>' + esc(decision.account) + '</p><p class="rationale-text">' + esc(decision.reason) + '</p><p>' + esc(decision.model) + ' · ' + jobTime(decision.createdAt) + '</p></div>').join('') + '</details>';
+    return '<details class="decision-history"' + (open ? ' open' : '') + '><summary>Recent classification decisions · ' + decisions.length + '</summary>' + decisions.slice(0, 20).map((decision) => '<div class="review-context review-rationale"><strong>' + esc(decision.category || 'No usable category') + ' · ' + esc(jobStatus(decision.state)) + '</strong><p>' + esc(decision.account) + '</p><p class="rationale-text">' + esc(decision.reason) + '</p><p>' + esc(decision.model) + ' · ' + jobTime(decision.createdAt) + '</p></div>').join('') + '</details>';
   }
   function renderAutomation() {
     const supported = !!data?.capabilities?.automation;
@@ -1647,15 +1655,15 @@ export const PORTAL_HTML = `<!doctype html>
       '<div><dt>Brief email</dt><dd>' + (delivery ? jobBadge(delivery.state) : 'No delivery yet') + '</dd></div>' +
       '<div><dt>Next fallback</dt><dd>' + (schedule.enabled ? jobTime(schedule.nextRunAt) : 'Paused') + '</dd></div></dl>' +
       (delivery ? '<p class="automation-detail">' + esc(delivery.day) + ' · ' + esc(delivery.recipient) + (delivery.sentAt ? ' · sent ' + jobTime(delivery.sentAt) : '') + (delivery.state === 'uncertain' ? ' · Delivery is being checked before another send is attempted.' : '') + '</p>' : '') +
-      (latest ? '<p class="automation-detail">' + count(latest.reviewed) + ' reviewed · ' + count(latest.applied) + ' applied · ' + count(latest.held) + ' held for you · ' + count(latest.failed) + ' failed' + (latest.nextAttemptAt ? ' · next attempt ' + jobTime(latest.nextAttemptAt) : '') + (latest.errorCode ? ' · ' + esc(actionErrorMessage(latest.errorCode)) : '') + '</p>' : '') +
+      (latest ? '<p class="automation-detail">' + count(latest.reviewed) + ' reviewed · ' + count(latest.applied) + ' applied · ' + count(latest.held) + ' unresolved · ' + count(latest.failed) + ' failed' + (latest.nextAttemptAt ? ' · next attempt ' + jobTime(latest.nextAttemptAt) : '') + (latest.errorCode ? ' · ' + esc(actionErrorMessage(latest.errorCode)) : '') + '</p>' : '') +
       (runs.length ? '<details class="job-history"' + (historyOpen ? ' open' : '') + '><summary>Workflow history · ' + runs.length + '</summary><div class="automation-history">' + runs.slice(0, 12).map((run) => '<div class="automation-history-row"><span>' + esc(run.kind) + '<small>' + jobTime(run.startedAt || run.createdAt) + '</small></span>' + jobBadge(run.state) + '<span>' + count(run.applied) + ' applied · ' + count(run.held) + ' held</span></div>').join('') + '</div></details>' : '') + decisionHistory(automation.recentDecisions, decisionsOpen);
     const reviews = (automation.reviews || []).filter((item) => !item.resolvedAt);
     const backlog = automation.backlog;
     const total = backlog ? count(backlog.total) : reviews.length;
-    $("review-queue").innerHTML = '<div class="portfolio-heading"><div><h2>Held conversations</h2><p class="mutetext">Held messages stay in your inbox until a category is resolved.</p></div><span class="chip">' + total + ' held</span></div>' +
-      (backlog ? '<p class="automation-detail">' + count(backlog.awaitingAgent) + ' awaiting Claude review · ' + count(backlog.needsDecision) + ' need your decision · ' + count(backlog.needsContext) + ' need more context</p>' : '') +
+    $("review-queue").innerHTML = '<div class="portfolio-heading"><div><h2>Held conversations</h2><p class="mutetext">Pending and unresolved mail moves to Uncertain. Corrections are optional.</p></div><span class="chip">' + total + ' held</span></div>' +
+      (backlog ? '<p class="automation-detail">' + count(backlog.awaitingAgent) + ' awaiting Claude review · ' + count(backlog.needsDecision) + ' unresolved · ' + count(backlog.needsContext) + ' incomplete context</p>' : '') +
       (total > reviews.length ? '<p class="mutetext">Showing ' + reviews.length + ' of ' + total + ' held conversations.</p>' : '') +
-      (reviews.length ? '<div class="review-list panel">' + reviews.map((item) => '<article class="review-row"><div><h3>' + esc(item.subject || '(No subject)') + '</h3><p>' + esc(item.sender) + ' · ' + esc(item.account) + '</p><p class="review-reason">' + esc(jobStatus(item.reason)) + (item.category ? ' · suggested ' + esc(item.category) : '') + '</p></div><button class="quiet-button" type="button" data-write-control data-review-item="' + esc(item.id) + '"' + (item.reviewable === false ? ' data-review-unavailable' : '') + '>' + (item.reviewable === false ? 'Not actionable' : 'Review classification') + '</button></article>').join('') + '</div>' : '<p class="mutetext">No decisions are waiting for your review.</p>');
+      (reviews.length ? '<div class="review-list panel">' + reviews.map((item) => '<article class="review-row"><div><h3>' + esc(item.subject || '(No subject)') + '</h3><p>' + esc(item.sender) + ' · ' + esc(item.account) + '</p><p class="review-reason">' + esc(jobStatus(item.reason)) + (item.category ? ' · suggested ' + esc(item.category) : '') + '</p></div><button class="quiet-button" type="button" data-write-control data-review-item="' + esc(item.id) + '"' + (item.reviewable === false ? ' data-review-unavailable' : '') + '>' + (item.reviewable === false ? 'Not actionable' : 'Review classification') + '</button></article>').join('') + '</div>' : '<p class="mutetext">No pending or unresolved conversations.</p>');
     refreshActionControls();
   }
   async function refreshAutomation() {
@@ -1679,7 +1687,7 @@ export const PORTAL_HTML = `<!doctype html>
     if (!automationAvailable || !automation?.configured || automation.paused) return;
     const labels = { daily: 'Run daily workflow', review: 'Run email review', brief: 'Generate & email brief' };
     if (!Object.hasOwn(labels, kind)) return;
-    const description = kind === 'review' ? 'Claude will review eligible held Gmail conversations. Clear decisions can apply the permitted labels and archive actions; ambiguous messages stay for you.'
+    const description = kind === 'review' ? 'Claude will choose and apply best-fit categories for eligible conversations within the daily quota. Pending and unresolved mail moves to Uncertain; corrections are optional.'
       : kind === 'brief' ? 'Create today’s briefing and email it to your configured address. An existing briefing or delivery for today is reused so it is not sent twice.'
       : 'Run the enabled email-review and daily-brief stages. The brief is emailed to your configured address; today’s existing delivery is reused.';
     openActionEditor({ title: labels[kind], description, submit: labels[kind], action: 'automation.run', input: () => ({ kind }) });
@@ -1688,8 +1696,8 @@ export const PORTAL_HTML = `<!doctype html>
     if (!automationAvailable || !automation || automation.paused) return;
     const schedule = automation.schedule;
     const checkbox = (name, checked, label) => '<label class="form-check"><input type="checkbox" name="' + name + '"' + (checked ? ' checked' : '') + '><span>' + esc(label) + '</span></label>';
-    openActionEditor({ title: 'Daily workflow settings', description: 'The workflow follows scheduled Gmail triage. The Eastern fallback time starts it if the triage handoff was missed. Manual runs remain available when the schedule is paused.', submit: 'Save schedule', action: 'automation.schedule',
-      fields: checkbox('enabled', schedule.enabled, 'Enable the daily workflow') + field('Fallback time · Eastern', inputControl('localTime', schedule.localTime || '07:00', 'type="time" required')) + checkbox('reviewEnabled', schedule.reviewEnabled, 'Review held email with Claude') + checkbox('briefEnabled', schedule.briefEnabled, 'Prepare and email the daily brief'),
+    openActionEditor({ title: 'Daily workflow settings', description: 'The workflow follows scheduled Gmail triage. The Eastern fallback time starts it if the triage handoff was missed. Disabling the workflow or automatic email filing also pauses moves to Uncertain. Manual runs remain available when the schedule is paused.', submit: 'Save schedule', action: 'automation.schedule',
+      fields: checkbox('enabled', schedule.enabled, 'Enable the daily workflow') + field('Fallback time · Eastern', inputControl('localTime', schedule.localTime || '07:00', 'type="time" required')) + checkbox('reviewEnabled', schedule.reviewEnabled, 'Automatically file email with Claude') + checkbox('briefEnabled', schedule.briefEnabled, 'Prepare and email the daily brief'),
       input: (form) => ({ enabled: form.has('enabled'), localTime: String(form.get('localTime')), reviewEnabled: form.has('reviewEnabled'), briefEnabled: form.has('briefEnabled') }),
     });
   }
@@ -1706,7 +1714,7 @@ export const PORTAL_HTML = `<!doctype html>
   }
 
   // ---- paged email review workspace ----
-  const REVIEW_BUCKET_LABELS = { awaitingAgent: 'Awaiting Claude', needsDecision: 'Needs your decision', needsContext: 'Needs more context', queued: 'Changes queued' };
+  const REVIEW_BUCKET_LABELS = { awaitingAgent: 'Awaiting Claude', needsDecision: 'Unresolved · optional review', needsContext: 'Incomplete context', queued: 'Changes queued' };
   const reviewWorkspace = { snapshot: null, accounts: [], available: false, loading: false, filters: { bucket: 'all', search: '', account: '', category: '' }, cursors: [null], page: 0, selected: new Map(), sequence: 0, controller: null, notice: '', error: '', latestCommand: null };
   let reviewDetailSequence = 0, reviewDetailController = null, reviewDetailItem = null;
   function reviewActionable(item) { return item?.reviewable === true && typeof item.revision === 'string' && !!item.revision && item.bucket !== 'queued'; }
@@ -1737,7 +1745,7 @@ export const PORTAL_HTML = `<!doctype html>
   }
   function reviewSource(item) { return 'https://mail.google.com/mail/u/?authuser=' + encodeURIComponent(item.account) + '#all/' + encodeURIComponent(item.threadId); }
   function reviewOutcomeText(code) {
-    const known = { LOW_CONFIDENCE: 'Classifier confidence was below the automatic-filing threshold.', REVIEW_STALE: 'Conversation changed; inspect it again.', REVIEW_EVIDENCE_CHANGED: 'Conversation changed; inspect it again.', REVIEW_REVISION_MISMATCH: 'Conversation changed; inspect it again.', REVIEW_CONTEXT_CHANGED: 'Conversation changed; inspect it again.', MAIL_CHANGED_SINCE_DISCOVERY: 'Gmail labels changed after the conversation was captured.', MAIL_CHANGED_BEFORE_APPLY: 'The conversation or its labels changed before changes could be applied.', GMAIL_POSTCONDITION_CHANGED: 'Gmail no longer matched the expected result; further changes were held.', REVIEW_NOT_ELIGIBLE: 'No longer actionable.', REVIEW_NOT_FOUND: 'No longer in the queue.', REVIEW_CONTEXT_INCOMPLETE: 'More context is needed.', REVIEW_INCOMPLETE_CONTEXT: 'The available message text did not pass the complete-context check.', INSUFFICIENT_OR_TRUNCATED_CONTEXT: 'Message text is missing, truncated, or exceeds the review limit.', REVIEW_IDENTITY_MISMATCH: 'The proposal did not match this conversation and revision.', REVIEW_NOT_CLEAR: 'The proposal did not pass the clear-category and confidence checks.', REVIEW_INVALID_EVIDENCE: 'The proposal did not pass the supporting-message evidence checks.', REVIEW_NOT_RESOLVABLE: 'The current conversation state does not permit another classification.', REVIEW_ALREADY_QUEUED: 'This conversation already has queued changes.', UNCERTAIN_GMAIL_MUTATION: 'Gmail changes need reconciliation before another action.', HUMAN_REVIEW_APPLY_FAILED: 'The Gmail change could not finish. Inspect its current state.', REVIEW_PREFERENCE_CHANGED: 'A sender preference changed. Review the conversation again.' };
+    const known = { UNCERTAIN_EVIDENCE_CHANGED: 'The conversation or its labels changed; filing was skipped.', UNCERTAIN_REVIEW_SUPERSEDED: 'A newer version of this conversation exists; the older entry was skipped.', UNCERTAIN_PARKING_REQUIRES_RECONCILIATION: 'The Gmail result needs reconciliation before another change.', UNCERTAIN_PARKING_PENDING_RECONCILIATION: 'The Gmail result is being checked before another change.', UNCERTAIN_NOT_ELIGIBLE: 'The current conversation state does not permit automatic filing.', UNCERTAIN_UNSAFE_CAPTURE: 'The captured messages no longer qualify for an inbox move.', LOW_CONFIDENCE: 'Classifier confidence was below the automatic-filing threshold.', REVIEW_STALE: 'Conversation changed; inspect it again.', REVIEW_EVIDENCE_CHANGED: 'Conversation changed; inspect it again.', REVIEW_REVISION_MISMATCH: 'Conversation changed; inspect it again.', REVIEW_CONTEXT_CHANGED: 'Conversation changed; inspect it again.', MAIL_CHANGED_SINCE_DISCOVERY: 'Gmail labels changed after the conversation was captured.', MAIL_CHANGED_BEFORE_APPLY: 'The conversation or its labels changed before changes could be applied.', GMAIL_POSTCONDITION_CHANGED: 'Gmail no longer matched the expected result; further changes were held.', REVIEW_NOT_ELIGIBLE: 'No longer actionable.', REVIEW_NOT_FOUND: 'No longer in the queue.', REVIEW_CONTEXT_INCOMPLETE: 'More context is needed.', REVIEW_INCOMPLETE_CONTEXT: 'The available message text did not pass the complete-context check.', INSUFFICIENT_OR_TRUNCATED_CONTEXT: 'Message text is missing, truncated, or exceeds the review limit.', REVIEW_IDENTITY_MISMATCH: 'The proposal did not match this conversation and revision.', REVIEW_NOT_CLEAR: 'The proposal did not pass the clear-category and confidence checks.', REVIEW_INVALID_EVIDENCE: 'The proposal did not pass the supporting-message evidence checks.', REVIEW_NOT_RESOLVABLE: 'The current conversation state does not permit another classification.', REVIEW_ALREADY_QUEUED: 'This conversation already has queued changes.', UNCERTAIN_GMAIL_MUTATION: 'Gmail changes need reconciliation before another action.', HUMAN_REVIEW_APPLY_FAILED: 'The Gmail change could not finish. Inspect its current state.', REVIEW_PREFERENCE_CHANGED: 'A sender preference changed. Review the conversation again.' };
     return known[code] || (code ? actionErrorMessage(code, 'This item needs another look. Inspect its latest conversation.') : '');
   }
   function renderReviewCommands(commands) {
@@ -1777,7 +1785,7 @@ export const PORTAL_HTML = `<!doctype html>
     if ($('review-workspace').hidden) return;
     const counts = snapshot?.counts || snapshot?.backlog;
     $('review-total').textContent = counts ? count(counts.total) + ' held' : 'Review queue';
-    $('review-backlog').textContent = counts ? count(counts.awaitingAgent) + ' awaiting Claude · ' + count(counts.needsDecision) + ' need your decision · ' + count(counts.needsContext) + ' need more context · ' + count(counts.queued) + ' queued' : 'Conversations stay held until a category is explicitly chosen or a review completes.';
+    $('review-backlog').textContent = counts ? count(counts.awaitingAgent) + ' awaiting Claude · ' + count(counts.needsDecision) + ' unresolved · ' + count(counts.needsContext) + ' incomplete context · ' + count(counts.queued) + ' queued' : 'Filing runs automatically. You can optionally inspect or correct a category.';
     const account = $('review-account'), accounts = state.accounts;
     const accountSignature = JSON.stringify(accounts);
     if (account.dataset.options !== accountSignature) { const selected = account.value; account.innerHTML = '<option value="">All accounts</option>' + accounts.map((value) => '<option value="' + esc(value) + '">' + esc(value) + '</option>').join(''); account.value = selected; account.dataset.options = accountSignature; }

@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { transaction } from "../state/database.js";
-import { CATEGORIES, type Category, type Decision, type JobRun, type MutationPlan, type ReviewItem, type RunMode, type SenderPreference } from "./types.js";
-import { JEV_MINIMUM_CONFIDENCE } from "./policy.js";
+import { CATEGORIES, type Category, type Decision, type JobRun, type MutationPlan, type ReviewItem, type RunMode, type SenderPreference, type CapturedMessage } from "./types.js";
+import { JEV_MINIMUM_CONFIDENCE, UNCERTAIN_LABEL } from "./policy.js";
 
 export type WorkState = "discovered" | "classified" | "applying" | "applied" | "retryable" | "needs_review" | "superseded";
 export interface WorkItem {
@@ -11,6 +11,10 @@ export interface WorkItem {
   subject: string; sender: string; triggerIds: string[]; triggerDate: number; revision: string; labelRevision?: string;
   rubricVersion?: string; rubricHash?: string;
   decision?: Decision; plan?: MutationPlan; reason?: string; supersedesTaskId?: string;
+}
+export interface UncertainFiling {
+  workId: string; state: "pending" | "filed" | "blocked"; revision: string; labelRevision?: string;
+  plan?: MutationPlan; before?: CapturedMessage[]; attemptedAt?: string; acknowledged?: boolean; filedAt?: string; reason?: string;
 }
 export interface TaskLink { account: string; threadId: string; taskId: string; workId: string; triggerDate: number; triggerIds: string[]; sender: string; subject: string; active: boolean }
 
@@ -25,6 +29,7 @@ export class JobStore {
       CREATE TABLE IF NOT EXISTS triage_task_links (account TEXT NOT NULL, thread_id TEXT NOT NULL, task_id TEXT NOT NULL, active INTEGER NOT NULL, json TEXT NOT NULL, PRIMARY KEY(account,thread_id));
       CREATE TABLE IF NOT EXISTS triage_mutation_attempts (id TEXT PRIMARY KEY, work_id TEXT NOT NULL REFERENCES triage_work(id), started_at TEXT NOT NULL, outcome TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS owned_generated_messages (account TEXT NOT NULL, rfc_message_id TEXT NOT NULL, gmail_message_id TEXT, PRIMARY KEY(account,rfc_message_id));
+      CREATE TABLE IF NOT EXISTS triage_uncertain_filings (work_id TEXT PRIMARY KEY REFERENCES triage_work(id), state TEXT NOT NULL, json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS triage_sender_preferences (id TEXT PRIMARY KEY, account TEXT NOT NULL, sender TEXT NOT NULL, active INTEGER NOT NULL, json TEXT NOT NULL, UNIQUE(account,sender));
     `);
   }
@@ -52,15 +57,21 @@ export class JobStore {
     const review = decode<ReviewItem>(this.db.prepare("SELECT json FROM triage_reviews WHERE id=? AND resolved_at IS NULL").get(id));
     if (!review) return;
     const work = this.work(id);
-    const decision = work?.decision;
+    const decision = work?.decision, parking = this.uncertainFiling(id);
+    const uncertainFiling: ReviewItem["uncertainFiling"] = work?.mode === "apply" && work.kind === "classify" ? parking ? { state: parking.state, label: UNCERTAIN_LABEL, ...(parking.reason ? { reason: parking.reason } : {}), ...(parking.filedAt ? { filedAt: parking.filedAt } : {}) } : { state: this.canFileUncertain(work) ? "pending" : "blocked", label: UNCERTAIN_LABEL, ...(this.canFileUncertain(work) ? {} : { reason: "UNCERTAIN_NOT_ELIGIBLE" }) } : undefined;
     // Do not relabel a later human/Claude decision as the original Jev result.
     const classification = typeof decision?.model === "string" && decision.model.startsWith("jev-") && !decision.reviewed && !decision.agentReview && !decision.humanReview && CATEGORIES.includes(decision.category) && Number.isFinite(decision.confidence) && decision.confidence >= 0 && decision.confidence <= 1
       ? { provider: "jev" as const, model: decision.model, category: decision.category, confidence: decision.confidence,
           probabilities: Object.fromEntries(CATEGORIES.flatMap(category => { const value = decision.probabilities?.[category]; return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1 ? [[category, value]] : []; })), minimumConfidence: JEV_MINIMUM_CONFIDENCE }
       : undefined;
-    return { ...review, ...(classification ? { classification } : {}), mode: work?.mode, revision: work?.revision, reviewable: work?.mode === "apply" && work.kind === "classify" && work.state === "needs_review" && !work.plan && review.reason === "LOW_CONFIDENCE" && !this.hasAttempt(id) };
+    return { ...review, ...(uncertainFiling ? { uncertainFiling } : {}), ...(classification ? { classification } : {}), mode: work?.mode, revision: work?.revision, reviewable: work?.mode === "apply" && work.kind === "classify" && work.state === "needs_review" && !work.plan && review.reason === "LOW_CONFIDENCE" && !this.hasAttempt(id) && !this.unreconciledUncertain(id) };
   }
   reviews(): ReviewItem[] { return this.db.prepare("SELECT id FROM triage_reviews WHERE resolved_at IS NULL ORDER BY rowid").all().map(row => this.reviewItem(row.id as string)!); }
+  uncertainFiling(id: string): UncertainFiling | undefined { return decode(this.db.prepare("SELECT json FROM triage_uncertain_filings WHERE work_id=?").get(id)); }
+  saveUncertainFiling(value: UncertainFiling): void { this.db.prepare("INSERT INTO triage_uncertain_filings VALUES(?,?,?) ON CONFLICT(work_id) DO UPDATE SET state=excluded.state,json=excluded.json").run(value.workId,value.state,JSON.stringify(value)); }
+  unreconciledUncertain(id: string): boolean { const value = this.uncertainFiling(id); return !!value?.attemptedAt && value.state !== "filed"; }
+  canFileUncertain(work: WorkItem): boolean { return work.mode === "apply" && work.kind === "classify" && work.state === "needs_review" && !work.plan && !work.decision?.humanReview && !this.hasAttempt(work.id) && ["LOW_CONFIDENCE", "INSUFFICIENT_OR_TRUNCATED_CONTEXT"].includes(work.reason ?? ""); }
+  newerClassification(work: WorkItem): boolean { return !!this.db.prepare("SELECT 1 FROM triage_work WHERE account=? AND mode='apply' AND json_extract(json,'$.threadId')=? AND json_extract(json,'$.kind')='classify' AND rowid>(SELECT rowid FROM triage_work WHERE id=?) LIMIT 1").get(work.account,work.threadId,work.id); }
   hasAttempt(id: string): boolean { return !!this.db.prepare("SELECT 1 FROM triage_mutation_attempts WHERE work_id=? LIMIT 1").get(id); }
   hasHumanIntent(id: string): boolean { return !!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='automation_human_review_intents'").get() && !!this.db.prepare("SELECT 1 FROM automation_human_review_intents WHERE item_id=?").get(id); }
   acceptHuman(id: string, decision: Decision): ReviewItem {
@@ -112,7 +123,7 @@ export class JobStore {
       const review = decode<ReviewItem>(this.db.prepare("SELECT json FROM triage_reviews WHERE id=? AND resolved_at IS NULL").get(id));
       if (!item || !review || item.kind !== "classify") throw new Error("REVIEW_NOT_RESOLVABLE");
       // A human category decision never authorizes replay of a partially applied mutation.
-      if (this.hasAttempt(id) || item.plan && !["MAIL_CHANGED_BEFORE_APPLY"].includes(review.reason)) throw new Error("REVIEW_UNCERTAIN_MUTATION_REQUIRES_RECONCILIATION");
+      if (this.hasAttempt(id) || this.unreconciledUncertain(id) || item.plan && !["MAIL_CHANGED_BEFORE_APPLY"].includes(review.reason)) throw new Error("REVIEW_UNCERTAIN_MUTATION_REQUIRES_RECONCILIATION");
       item.decision = { category, confidence: 1, probabilities: {} as Decision["probabilities"], model: "human", reviewed: true };
       // Explicit review may replace a never-attempted plan. Uncertain writes remain unreplayable.
       delete item.plan; delete item.labelRevision;

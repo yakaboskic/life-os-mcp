@@ -39,15 +39,17 @@ export interface JobRun {
   state: "running" | "success" | "partial" | "failed" | "interrupted";
   startedAt: string; finishedAt?: string; accounts: AccountResult[]; errorCode?: string;
   reviewedIds?: string[];
+  uncertainIds?: string[];
 }
 export type ReviewGateReason = "accepted" | "not_clear" | "needs_context" | "no_category" | "below_threshold" | "policy_error";
 export interface ReviewDecisionDiagnostics { confidence?: number; clear?: boolean; needsMoreContext?: boolean; gateReason?: ReviewGateReason }
 export interface ClassificationDiagnostics { provider: "jev"; model: string; category: Category; confidence: number; probabilities: Partial<Record<Category, number>>; minimumConfidence: number }
-export interface AgentReviewSummary extends ReviewDecisionDiagnostics { category: Category | null; reason: string; model: string; createdAt: string; source: "claude" | "policy"; minimumConfidence: number }
+export interface AgentReviewSummary extends ReviewDecisionDiagnostics { category: Category | null; reason: string; model: string; createdAt: string; source: "claude" | "policy"; minimumConfidence?: number; decisionPolicy?: "best-fit" | "confidence-threshold"; policyVersion?: string }
 export interface ReviewItem {
   id: string; account: string; threadId: string; subject: string; sender: string;
   category?: Category; confidence?: number; reason: string; createdAt: string; resolvedAt?: string;
   mode?: RunMode; revision?: string; reviewable?: boolean;
+  uncertainFiling?: { state: "pending" | "filed" | "blocked"; label: "Uncertain"; reason?: string; filedAt?: string };
   classification?: ClassificationDiagnostics;
   agentReview?: AgentReviewSummary;
 }
@@ -61,7 +63,7 @@ export interface JobStatus {
   nextRunAt: string; schedule: string; timeZone: string; accounts: AccountResult[];
   reviewCount: number; paused: boolean; configuredAccounts: string[];
 }
-export interface StartJobInput { mode: RunMode; scheduled?: boolean; retryRunId?: string; reviewedIds?: string[]; signal?: AbortSignal }
+export interface StartJobInput { mode: RunMode; scheduled?: boolean; retryRunId?: string; reviewedIds?: string[]; uncertainIds?: string[]; signal?: AbortSignal }
 export interface JobService {
   start(input: StartJobInput): Promise<JobRun>; status(): JobStatus; history(limit?: number): JobRun[];
   reviews(): ReviewItem[]; resolve(itemId: string, category: Category): ReviewItem;
@@ -69,6 +71,7 @@ export interface JobService {
   reviewContext?(itemId: string, signal: AbortSignal): Promise<AgentReviewContext>;
   acceptAgentReview?(proposal: AgentReviewProposal, model: string, signal: AbortSignal, guard?: () => void): Promise<ReviewItem>;
   applyReviewed?(ids: string[], signal?: AbortSignal): Promise<JobRun>;
+  fileUncertain?(ids: string[], signal?: AbortSignal): Promise<{ filed: number; failed: number }>;
   readyReviewIds?(): string[];
   reviewedWorkState?(id: string): string | undefined;
   inspectReview?(itemId: string, signal: AbortSignal): Promise<ReviewInspection>;

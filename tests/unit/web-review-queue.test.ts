@@ -40,10 +40,33 @@ function harness(request: (url: string, init: RequestInit) => Promise<Response> 
 }
 
 describe("paged email review workspace", () => {
+  it("describes best-fit decisions without a confidence approval cutoff", () => {
+    const api = harness();
+    const html = api.reviewRationale({ source: "claude", decisionPolicy: "best-fit", category: "NEWSLETTER", model: "claude-test", reason: "An expired promotion.", confidence: 0.62, clear: false, needsMoreContext: false, gateReason: "accepted" });
+    expect(html).toContain("Recorded confidence: 62%.");
+    expect(html).toContain("confidence is diagnostic, not an approval cutoff");
+    expect(html).toContain("Claude selected a best-fit category");
+    expect(html).toContain("optionally correct");
+    expect(html).not.toMatch(/95%|previous review policy|confidence requirement/);
+  });
+
+  it("distinguishes confirmed Uncertain filing from pending or blocked writes", () => {
+    const api = harness();
+    const filed = api.reviewDiagnostics(item("filed", { uncertainFiling: { state: "filed", label: "Uncertain" } }));
+    expect(filed).toContain("Filed in Gmail / Uncertain. Reviewing it is optional.");
+    const pending = api.reviewSuggestions(item("pending", { uncertainFiling: { state: "pending", label: "Uncertain" } }));
+    expect(pending).toContain("filing to Gmail / Uncertain is pending");
+    expect(pending).not.toContain("Filed in Gmail");
+    const blocked = api.reviewSuggestions(item("blocked", { uncertainFiling: { state: "blocked", label: "Uncertain", reason: "REVIEW_EVIDENCE_CHANGED" } }));
+    expect(blocked).toContain("could not be confirmed safely");
+    expect(blocked).not.toContain("Filed in Gmail");
+    expect(api.reviewSuggestions(item())).toContain("status has not been recorded yet");
+  });
+
   it("shows the recorded confidence gate separately from the top three category probabilities", async () => {
     const held = item("score", { reason: "LOW_CONFIDENCE", classification: { provider: "jev", model: "jev-test", category: "NEWSLETTER", confidence: 0.7621, minimumConfidence: 0.9, probabilities: { "FYI/READ": 0.4, NEWSLETTER: 0.55, CALENDAR: 0.04, WAITING: 0.01, UNKNOWN: 1, "ACTION/NOW": -1, "ACTION/SOON": NaN } } });
     const api = harness(async () => Response.json(page([held]))); await api.refreshReviewQueue();
-    expect(api.$("review-results").innerHTML).toContain("Jev confidence 76.21%; automatic filing currently requires at least 90%.");
+    expect(api.$("review-results").innerHTML).toContain("Jev confidence 76.21%; direct filing by Jev requires at least 90%.");
     const html = api.reviewDiagnostics(held);
     expect(html).toContain("Model: jev-test");
     expect(html).toContain("Jev returned scores, not a written explanation.");
@@ -59,7 +82,7 @@ describe("paged email review workspace", () => {
   it("keeps Jev and Claude suggestions separate when Claude returned no clear category", () => {
     const api = harness(), held = item("null-category", { category: "NEWSLETTER", classification: { category: "NEWSLETTER" }, agentReview: { source: "claude", category: null, model: "claude-test", reason: "The next owner action is unclear." } });
     const html = api.reviewSuggestions(held);
-    expect(html).toContain("Jev suggested: NEWSLETTER"); expect(html).toContain("Claude proposal: No clear category");
+    expect(html).toContain("Jev suggested: NEWSLETTER"); expect(html).toContain("Claude proposal: No usable category");
     expect(html).not.toContain("Claude proposal: NEWSLETTER");
     expect(api.reviewSuggestions(item())).toContain("No Claude review recorded for this version");
   });
@@ -67,9 +90,9 @@ describe("paged email review workspace", () => {
   it("shows saved Claude confidence and flags without inventing values for historical reviews", () => {
     const api = harness();
     const current = api.reviewRationale({ source: "claude", category: "ACTION/SOON", model: "claude-test", reason: "A reply may still be needed.", confidence: 0.91, minimumConfidence: 0.95, clear: true, needsMoreContext: false, gateReason: "below_threshold" });
-    expect(current).toContain("Recorded confidence: 91%; automatic review currently requires at least 95%.");
+    expect(current).toContain("Recorded confidence: 91%; this review used a 95% confidence requirement.");
     expect(current).toContain("Clear category: yes. More context requested: no.");
-    expect(current).toContain("Claude confidence did not meet the automatic-review requirement.");
+    expect(current).toContain("Claude confidence did not meet the previous automatic-review requirement.");
     const old = api.reviewRationale({ source: "claude", category: null, model: "claude-test", reason: "The answer is missing.", minimumConfidence: 0.95 });
     expect(old).toContain("Confidence was not recorded for this review.");
     expect(old).toContain("checks were not recorded for this review.");
@@ -93,7 +116,7 @@ describe("paged email review workspace", () => {
   it("escapes diagnostic data and keeps values just below the threshold visibly below it", () => {
     const api = harness(), classification = { provider: "jev", model: '<img src=x onerror="bad()">', category: "NEWSLETTER", confidence: 0.8999999, minimumConfidence: 0.9, probabilities: { NEWSLETTER: 1 } };
     const html = api.reviewDiagnostics(item("edge", { reason: "LOW_CONFIDENCE", classification }));
-    expect(html).toContain("Jev confidence &lt;90%; automatic filing currently requires at least 90%.");
+    expect(html).toContain("Jev confidence &lt;90%; direct filing by Jev requires at least 90%.");
     expect(html).not.toContain("<img"); expect(html).toContain("&lt;img");
     const rationale = api.reviewRationale({ source: "claude", category: null, model: "claude-test", reason: '<script>bad()</script><svg onload="bad()">', confidence: 0, clear: false, needsMoreContext: true, gateReason: "needs_context", minimumConfidence: 0.95 });
     expect(rationale).not.toMatch(/<(?:script|svg)\b/); expect(rationale).toContain("Recorded confidence: 0%");

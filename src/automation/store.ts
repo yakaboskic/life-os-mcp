@@ -5,6 +5,7 @@ import { transaction } from "../state/database.js";
 import type { AutomationKind, AutomationRun, AutomationSchedule, AutomationReviewDecision, BriefDelivery, BriefingArtifact, ReviewCommandProgress, ReviewReceipt } from "./types.js";
 
 export interface ReviewRecord extends AutomationReviewDecision { revision: string; policyVersion: string }
+export interface UncertainMaintenance { nextAttemptAt: string; failures: number; after?: { createdAt: string; id: string } }
 export interface StoredRun extends AutomationRun { approvedIds?: string[]; humanCommandId?: string }
 export interface HumanReviewCommand extends ReviewCommandProgress { actor: string; rememberPreference: boolean; receipt: ReviewReceipt; captured: Record<string, ReviewItem>; capturedPreferences: Record<string, { sender: string; version: number }> }
 export interface AutomationLimits { maxCalls: number; maxInputTokens: number; maxOutputTokens: number; maxReviewCalls: number }
@@ -41,6 +42,7 @@ export class AutomationStore {
       CREATE TABLE IF NOT EXISTS automation_review_usage (day TEXT PRIMARY KEY, calls INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS automation_human_review_commands (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS automation_human_review_intents (item_id TEXT PRIMARY KEY, command_id TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS automation_maintenance (id TEXT PRIMARY KEY, json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS owned_generated_messages (account TEXT NOT NULL, rfc_message_id TEXT NOT NULL, gmail_message_id TEXT, PRIMARY KEY(account,rfc_message_id));
     `);
     // Older releases did not distinguish failed/aborted review calls from brief calls.
@@ -93,7 +95,10 @@ export class AutomationStore {
   fenced(run: StoredRun): boolean { const current = decode<StoredRun>(this.db.prepare("SELECT json FROM automation_runs WHERE id=?").get(run.id)); return current?.state === "running" && current.claim === run.claim; }
   reviewKey(id: string, revision: string, policy: string): string { return digest([id, revision, policy]); }
   reviewRecord(key: string): ReviewRecord | undefined { return decode(this.db.prepare("SELECT json FROM automation_review_decisions WHERE id=?").get(key)); }
+  latestReview(id: string, revision: string): ReviewRecord | undefined { return decode(this.db.prepare("SELECT json FROM automation_review_decisions WHERE json_extract(json,'$.id')=? AND json_extract(json,'$.revision')=? ORDER BY rowid DESC LIMIT 1").get(id, revision)); }
   saveReview(key: string, record: ReviewRecord): void { this.db.prepare("INSERT INTO automation_review_decisions VALUES(?,?) ON CONFLICT(id) DO UPDATE SET json=excluded.json").run(key, JSON.stringify(record)); }
+  uncertainMaintenance(): UncertainMaintenance | undefined { return decode(this.db.prepare("SELECT json FROM automation_maintenance WHERE id='uncertain-filing'").get()); }
+  saveUncertainMaintenance(value: UncertainMaintenance): void { this.db.prepare("INSERT INTO automation_maintenance VALUES('uncertain-filing',?) ON CONFLICT(id) DO UPDATE SET json=excluded.json").run(JSON.stringify(value)); }
   accepted(): ReviewRecord[] { return this.db.prepare("SELECT json FROM automation_review_decisions").all().map(row => decode<ReviewRecord>(row)!).filter(item => item.state === "accepted"); }
   decisions(limit = 200): ReviewRecord[] { return this.db.prepare("SELECT json FROM automation_review_decisions ORDER BY rowid DESC LIMIT ?").all(limit).map(row => decode<ReviewRecord>(row)!); }
   briefing(day?: string): BriefingArtifact | undefined { return decode(day ? this.db.prepare("SELECT json FROM automation_briefings WHERE day=?").get(day) : this.db.prepare("SELECT json FROM automation_briefings ORDER BY day DESC LIMIT 1").get()); }

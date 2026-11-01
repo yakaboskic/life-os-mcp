@@ -40,10 +40,15 @@ export function scheduleTime(now: Date, localTime: string, next = true): string 
 function code(error: unknown): string { return error instanceof Error && /^[A-Z][A-Z0-9_]+$/.test(error.message) ? error.message : error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name) ? "AUTOMATION_DEADLINE" : "AUTOMATION_UPSTREAM_FAILURE"; }
 const safeText = (text: string) => text.replace(/[<>]/g, "").replace(/\]\(/g, "] (").replace(/[\r\n]+/g, " ").trim();
 const REVIEW_BATCH_SIZE = 20;
+const UNCERTAIN_BATCH_SIZE = 100;
+const UNCERTAIN_BATCH_DEADLINE_MS = 4 * 60_000;
 function reviewSummary(record: ReviewRecord): AgentReviewSummary {
+  const decisionPolicy = record.decisionPolicy ?? (record.policyVersion === AUTOMATION_POLICY ? "best-fit" : record.policyVersion === "lifeos-review-v1" ? "confidence-threshold" : undefined);
+  const minimumConfidence = decisionPolicy === "confidence-threshold" ? record.minimumConfidence ?? CLAUDE_MINIMUM_CONFIDENCE : undefined;
   return { category: CATEGORIES.includes(record.category as Category) ? record.category as Category : null,
     reason: record.reason, model: record.model, createdAt: record.createdAt,
-    source: record.model === "policy" || record.gateReason === "policy_error" ? "policy" : "claude", minimumConfidence: CLAUDE_MINIMUM_CONFIDENCE,
+    source: record.model === "policy" || record.gateReason === "policy_error" ? "policy" : "claude", policyVersion: record.policyVersion,
+    ...(decisionPolicy ? { decisionPolicy } : {}), ...(minimumConfidence !== undefined ? { minimumConfidence } : {}),
     ...(typeof record.confidence === "number" && Number.isFinite(record.confidence) && record.confidence >= 0 && record.confidence <= 1 ? { confidence: record.confidence } : {}),
     ...(typeof record.clear === "boolean" ? { clear: record.clear } : {}),
     ...(typeof record.needsMoreContext === "boolean" ? { needsMoreContext: record.needsMoreContext } : {}),
@@ -78,9 +83,10 @@ class DurableAutomationService implements AutomationService {
     }
     return [...rows.values()].map(item => {
       const record = item.revision ? this.store.reviewRecord(this.store.reviewKey(item.id, item.revision, AUTOMATION_POLICY)) : undefined;
+      const displayed = record ?? (item.revision ? this.store.latestReview(item.id, item.revision) : undefined);
       const queuedCommandId = this.store.humanIntent(item.id);
       const bucket = queuedCommandId ? "queued" : item.reason === "INSUFFICIENT_OR_TRUNCATED_CONTEXT" ? "needsContext" : item.reviewable && !record ? "awaitingAgent" : "needsDecision";
-      return { ...item, bucket, reviewable: !!item.reviewable && !queuedCommandId, ...(queuedCommandId ? { queuedCommandId } : {}), ...(record ? { agentReview: reviewSummary(record) } : {}) } as ReviewQueueItem;
+      return { ...item, bucket, reviewable: !!item.reviewable && !queuedCommandId, ...(queuedCommandId ? { queuedCommandId } : {}), ...(displayed ? { agentReview: reviewSummary(displayed) } : {}) } as ReviewQueueItem;
     });
   }
   reviewQueue(query: ReviewQueueQuery = {}): ReviewQueuePage {
@@ -120,10 +126,10 @@ class DurableAutomationService implements AutomationService {
       else backlog.needsDecision++;
     }
     const reviews = allReviews.slice(0, 200).map(item => {
-      const record = item.revision ? this.store.reviewRecord(this.store.reviewKey(item.id, item.revision, AUTOMATION_POLICY)) : undefined;
+      const record = item.revision ? this.store.reviewRecord(this.store.reviewKey(item.id, item.revision, AUTOMATION_POLICY)) ?? this.store.latestReview(item.id, item.revision) : undefined;
       return { ...item, ...(record ? { agentReview: reviewSummary(record) } : {}) };
     });
-    return { configured: this.provider.configured() && this.mailConfigured(), model: this.provider.model, paused: this.paused, activeCount: this.activeCount, reviews, backlog, reviewCommands: this.commandProgress(), runs: this.store.runs(), schedule: { ...settings, nextRunAt: scheduleTime(this.now(), settings.localTime) }, briefing: this.store.briefing() ?? null, deliveries: this.store.deliveries(), usage: this.store.usage(easternDay(this.now())), recentDecisions: this.store.decisions().filter(item => accounts.includes(item.account)).slice(0, 20) };
+    return { configured: this.provider.configured() && this.mailConfigured(), model: this.provider.model, paused: this.paused, activeCount: this.activeCount, reviews, backlog, reviewCommands: this.commandProgress(), runs: this.store.runs(), schedule: { ...settings, nextRunAt: scheduleTime(this.now(), settings.localTime) }, briefing: this.store.briefing() ?? null, deliveries: this.store.deliveries(), usage: this.store.usage(easternDay(this.now())), recentDecisions: this.store.decisions().filter(item => accounts.includes(item.account)).slice(0, 20).map(record => ({ ...record, ...reviewSummary(record) })) };
   }
   async command(action: AutomationAction, input: unknown, requestId: string, actor: string): Promise<AutomationSnapshot> {
     if (!/^[A-Za-z0-9._:-]{8,128}$/.test(requestId) || !actor || actor.length > 320) throw new Error("AUTOMATION_INVALID_REQUEST");
@@ -176,14 +182,47 @@ class DurableAutomationService implements AutomationService {
   }
   tick(): Promise<void> {
     if (this.paused || this.running || this.jobs.status().activeRun || this.jobs.status().paused) return this.running ?? Promise.resolve();
+    this.controller = new AbortController();
+    this.running = this.tickWork(this.controller.signal).finally(() => { this.running = null; this.controller = null; }); return this.running;
+  }
+  private async tickWork(signal: AbortSignal): Promise<void> {
+    const parking = this.uncertainCandidates();
+    if (parking.length) await this.parkUncertain(parking, signal);
+    if (signal.aborted || this.paused || this.jobs.status().activeRun || this.jobs.status().paused) return;
     const settings = this.store.settings(), now = this.now();
     if (settings.enabled && now.toISOString() >= scheduleTime(now, settings.localTime, false)) this.store.enqueue(`daily:${easternDay(now)}`, "daily", easternDay(now), now.toISOString(), "schedule:fallback");
     const uncertain = this.mailConfigured() ? this.store.deliveries(100).find(entry => entry.state === "uncertain" && (entry.reconcileAttempts ?? 0) < 12 && (!entry.nextReconcileAt || entry.nextReconcileAt <= now.toISOString())) : undefined;
     if (uncertain) this.store.enqueue(`reconcile:${uncertain.id}:${uncertain.reconcileAttempts ?? 0}`, "brief", uncertain.day, now.toISOString(), "delivery:reconcile");
     this.enqueueReviewContinuation(now);
-    const run = this.store.claim(now.toISOString()); if (!run) return Promise.resolve();
-    this.controller = new AbortController();
-    this.running = this.execute(run, this.controller.signal).finally(() => { this.running = null; this.controller = null; }); return this.running;
+    const run = this.store.claim(now.toISOString()); if (run) await this.execute(run, signal);
+  }
+  private uncertainCandidates(): ReviewItem[] {
+    const settings = this.store.settings(), checkpoint = this.store.uncertainMaintenance();
+    if (!this.jobs.fileUncertain || !settings.enabled || !settings.reviewEnabled || this.config.env.LIFE_OS_TRIAGE_APPLY_ENABLED !== "true" || checkpoint && checkpoint.nextAttemptAt > this.now().toISOString()) return [];
+    const accounts = this.jobs.status().configuredAccounts;
+    const candidates = this.jobs.reviews().filter(item => item.mode === "apply" && accounts.includes(item.account) && item.uncertainFiling?.state === "pending" && !this.store.humanIntent(item.id)).sort((a, b) => a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+    const after = checkpoint?.after;
+    if (!after) return candidates.slice(0, UNCERTAIN_BATCH_SIZE);
+    const later = (item: ReviewItem) => item.createdAt > after.createdAt || item.createdAt === after.createdAt && item.id > after.id;
+    return [...candidates.filter(later), ...candidates.filter(item => !later(item))].slice(0, UNCERTAIN_BATCH_SIZE);
+  }
+  private async parkUncertain(items: ReviewItem[], cancelled: AbortSignal): Promise<void> {
+    const previous = this.store.uncertainMaintenance();
+    const last = items.at(-1)!, after = { createdAt: last.createdAt, id: last.id };
+    const stop = () => {
+      const failures = Math.min((previous?.failures ?? 0) + 1, 7);
+      this.store.saveUncertainMaintenance({ nextAttemptAt: new Date(this.now().getTime() + Math.min(60 * 60_000, 60_000 * 2 ** (failures - 1))).toISOString(), failures, after });
+    };
+    // Persist the cadence before touching Gmail, so a process restart cannot hot-loop.
+    this.store.saveUncertainMaintenance({ nextAttemptAt: new Date(this.now().getTime() + 60_000).toISOString(), failures: previous?.failures ?? 0, after });
+    try {
+      const result = await this.jobs.fileUncertain!(items.map(item => item.id), AbortSignal.any([cancelled, AbortSignal.timeout(UNCERTAIN_BATCH_DEADLINE_MS)]));
+      if (result.failed > 0 && result.filed === 0) stop();
+      else this.store.saveUncertainMaintenance({ nextAttemptAt: new Date(this.now().getTime() + 60_000).toISOString(), failures: 0, after });
+    } catch (error) {
+      stop();
+      if (!cancelled.aborted) this.logger.warn("uncertain filing batch stopped", { errorCode: code(error), items: items.length });
+    }
   }
   async drain(): Promise<void> { this.paused = true; this.controller?.abort(); if (this.running) await this.running; }
   resume(): void { this.paused = false; }
@@ -280,18 +319,18 @@ class DurableAutomationService implements AutomationService {
           const proposal = reviewSchema.parse(result.value);
           if (proposal.itemId !== context.itemId || proposal.revision !== context.revision || proposal.policyVersion !== context.policyVersion) throw new Error("REVIEW_IDENTITY_MISMATCH");
           diagnostics = { confidence: proposal.confidence, clear: proposal.clear, needsMoreContext: proposal.needsMoreContext,
-            gateReason: !proposal.clear ? "not_clear" : proposal.needsMoreContext ? "needs_context" : !proposal.category ? "no_category" : proposal.confidence < CLAUDE_MINIMUM_CONFIDENCE ? "below_threshold" : "accepted" };
+            gateReason: proposal.needsMoreContext ? "needs_context" : !proposal.category ? "no_category" : "accepted" };
           let accepted = false;
-          if (proposal.clear && !proposal.needsMoreContext && proposal.category && proposal.confidence >= CLAUDE_MINIMUM_CONFIDENCE) {
+          if (!proposal.needsMoreContext && proposal.category) {
             await this.jobs.acceptAgentReview({ ...proposal, preferenceEvidence: context.preferenceEvidence }, result.model, signal, () => this.assertClaim(run)); accepted = true; approved.add(item.id);
           }
-          this.store.saveReview(key, { id: item.id, account: context.account, category: proposal.category, revision: context.revision, policyVersion: AUTOMATION_POLICY, state: accepted ? "accepted" : "held", ...diagnostics, model: result.model, reason: safeText(proposal.reason), createdAt: this.now().toISOString() });
+          this.store.saveReview(key, { id: item.id, account: context.account, category: proposal.category, revision: context.revision, policyVersion: AUTOMATION_POLICY, decisionPolicy: "best-fit", state: accepted ? "accepted" : "held", ...diagnostics, model: result.model, reason: safeText(proposal.reason), createdAt: this.now().toISOString() });
           run.reviewed++; if (!accepted) run.held++; this.store.saveRun(run);
         } catch (error) {
           const errorCode = code(error);
           if (errorCode === "REVIEW_HUMAN_PENDING") continue;
           if (errorCode === "AUTOMATION_STALE_CLAIM" || errorCode.startsWith("CLAUDE_") || errorCode === "DAILY_MODEL_BUDGET_EXHAUSTED" || signal.aborted || errorCode === "AUTOMATION_UPSTREAM_FAILURE") throw error;
-          this.store.saveReview(key, { id: item.id, account: item.account, category: null, revision: item.revision!, policyVersion: AUTOMATION_POLICY, state: "held", ...diagnostics, gateReason: "policy_error", model: "policy", reason: errorCode, createdAt: this.now().toISOString() });
+          this.store.saveReview(key, { id: item.id, account: item.account, category: null, revision: item.revision!, policyVersion: AUTOMATION_POLICY, decisionPolicy: "best-fit", state: "held", ...diagnostics, gateReason: "policy_error", model: "policy", reason: errorCode, createdAt: this.now().toISOString() });
           run.held++; run.failed++; this.store.saveRun(run);
         }
       }
@@ -364,7 +403,7 @@ class DurableAutomationService implements AutomationService {
     for (const product of registry.products.slice(0, 30)) sources.push({ id: `product:${product.id}`, kind: "product", title: product.name.slice(0, 200), details: JSON.stringify({ deadline: product.deadline, lastCheckIn: product.lastCheckIn, status: product.status, goal: product.goal?.slice(0, 250) }) });
     const recent = this.jobs.history(10).filter(item => item.mode === "apply").slice(0, 3);
     for (const item of recent) sources.push({ id: `triage:${item.id}`, kind: "triage", title: `${item.day}: ${item.state}`, details: JSON.stringify({ completedAt: item.finishedAt, accounts: item.accounts }) });
-    for (const review of this.snapshot().reviews.slice(0, 25)) sources.push({ id: `review:${review.id}`, kind: "review", title: review.subject.slice(0, 200), details: `Held for review (${review.reason}). Account: ${review.account}. No action has been taken.` });
+    for (const review of this.snapshot().reviews.slice(0, 25)) sources.push({ id: `review:${review.id}`, kind: "review", title: review.subject.slice(0, 200), details: `Pending or unresolved automatic classification (${review.reason}); owner correction is optional. Account: ${review.account}.${review.uncertainFiling?.state === "filed" ? " Filed under Uncertain in Gmail." : review.uncertainFiling?.state === "blocked" ? " Uncertain filing is blocked; inspect current Gmail state." : " Uncertain filing is pending."}` });
     const accountSet = this.jobs.status().configuredAccounts;
     const heldCount = this.jobs.reviews().filter(item => item.mode === "apply" && accountSet.includes(item.account)).length;
     const coverage = [`Scheduled Gmail accounts: ${accountSet.join(", ") || "none"}.`, `Held Gmail items: ${heldCount}.`, "Slack and desktop-only Gmail connections are not included in this workflow.", "Uses current tracker records and completed triage summaries; no independent full-inbox scan."];

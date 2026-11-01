@@ -3,7 +3,7 @@ import { loadConfig } from "../../src/core/config.js";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
 import { ClaudeProvider, StructuredOutputError, apiCompatibleSchema, briefJsonSchema, briefSchema, reviewJsonSchema, reviewSchema, validateStructuredOutput } from "../../src/automation/provider.js";
 import type { AgentReviewContext } from "../../src/jobs/types.js";
-const context: AgentReviewContext = { itemId: "work1", revision: "a".repeat(64), policyVersion: "lifeos-review-v1", account: "owner@example.com", now: "2026-10-18T12:00:00Z", triggerIds: ["message1"], thread: { id: "thread1", messages: [] } };
+const context: AgentReviewContext = { itemId: "work1", revision: "a".repeat(64), policyVersion: "best-fit-v2", account: "owner@example.com", now: "2026-10-18T12:00:00Z", triggerIds: ["message1"], thread: { id: "thread1", messages: [] } };
 const value = { itemId: context.itemId, revision: context.revision, policyVersion: context.policyVersion, category: "ACTION/NOW", confidence: 0.99, clear: true, needsMoreContext: false, reason: "Explicit request", evidence: [{ messageId: "message1", quote: "Please review the proposal." }] };
 const response = (extra = {}) => ({ model: "claude-sonnet-5-5", stop_reason: "end_turn", content: [{ type: "text", text: JSON.stringify(value) }], usage: { input_tokens: 100, output_tokens: 100 }, ...extra });
 

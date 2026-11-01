@@ -9,8 +9,8 @@ import { openDatabase, transaction } from "../state/database.js";
 import { TrackStore } from "../toolsets/track/store.js";
 import { GmailJobGateway } from "./gmail.js";
 import { CATEGORY_CRITERIA, JevClassifier } from "./jev.js";
-import { JEV_MINIMUM_CONFIDENCE, CLAUDE_MINIMUM_CONFIDENCE } from "./policy.js";
-import { JobStore, type WorkItem } from "./store.js";
+import { JEV_MINIMUM_CONFIDENCE, CLAUDE_REVIEW_POLICY, UNCERTAIN_LABEL } from "./policy.js";
+import { JobStore, type WorkItem, type UncertainFiling } from "./store.js";
 import { ACTIVE_CATEGORIES, CATEGORIES, RUBRIC_VERSION, TIME_ZONE, type AgentReviewContext, type AgentReviewProposal, type AccountResult, type Category, type Classifier, type JobRun, type JobService, type JobStatus, type MailGateway, type MailMessage, type MailThread, type MutationPlan, type ReviewItem, type StartJobInput, type ReviewInspection, type HumanReviewInput } from "./types.js";
 
 export type { JobService, JobRun, JobStatus, ReviewItem, StartJobInput } from "./types.js";
@@ -48,7 +48,7 @@ function incoming(message: MailMessage): boolean { return !message.labels.includ
 function newer(a: Pick<MailMessage, "id" | "internalDate">, b: Pick<MailMessage, "id" | "internalDate">): boolean { return a.internalDate > b.internalDate || a.internalDate === b.internalDate && a.id > b.id; }
 function revision(thread: MailThread): string { return hash(eligible(thread).map(({ id, internalDate, from, to, subject, body }) => ({ id, internalDate, from, to, subject, body }))); }
 function relevantLabels(labels: string[], names: Record<string, string>): string[] {
-  const relevant = new Set(["INBOX", "STARRED", "SPAM", "TRASH", "SENT", "DRAFT", ...[...CATEGORIES, "ACTION/DONE"].map((name) => names[name]).filter((id): id is string => !!id)]);
+  const relevant = new Set(["INBOX", "STARRED", "SPAM", "TRASH", "SENT", "DRAFT", ...[...CATEGORIES, "ACTION/DONE", UNCERTAIN_LABEL].map((name) => names[name]).filter((id): id is string => !!id)]);
   return labels.filter((label) => relevant.has(label)).sort();
 }
 function sameLabels(a: string[], b: string[]): boolean { return JSON.stringify([...a].sort()) === JSON.stringify([...b].sort()); }
@@ -162,12 +162,12 @@ class GmailTriageService implements JobService {
     if (revision(thread) !== work.revision || work.labelRevision !== hash(thread.messages.map(message => [message.id, relevantLabels(message.labels, labels)]))) throw new Error("REVIEW_EVIDENCE_CHANGED");
     const messages = eligible(thread);
     if (!messages.length || messages.length > 50 || messages.some(message => message.truncated) || messages.reduce((sum, message) => sum + message.body.length, 0) > 60_000 || messages.filter(incoming).some(message => !message.body.trim())) throw new Error("REVIEW_INCOMPLETE_CONTEXT");
-    return { itemId: id, revision: work.revision, policyVersion: "lifeos-review-v1", account: work.account, now: this.now().toISOString(), thread, triggerIds: work.triggerIds, proposedCategory: work.decision?.category, ...this.preferenceContext(work.account, thread, work.triggerIds) };
+    return { itemId: id, revision: work.revision, policyVersion: CLAUDE_REVIEW_POLICY, account: work.account, now: this.now().toISOString(), thread, triggerIds: work.triggerIds, proposedCategory: work.decision?.category, ...this.preferenceContext(work.account, thread, work.triggerIds) };
   }
   async acceptAgentReview(proposal: AgentReviewProposal, model: string, signal: AbortSignal, guard?: () => void): Promise<ReviewItem> {
     const context = await this.reviewContext(proposal.itemId, signal);
     if (proposal.preferenceEvidence && JSON.stringify(proposal.preferenceEvidence) !== JSON.stringify(context.preferenceEvidence)) throw new Error("REVIEW_PREFERENCE_CHANGED");
-    if (proposal.revision !== context.revision || proposal.policyVersion !== context.policyVersion || !proposal.clear || proposal.needsMoreContext || !Number.isFinite(proposal.confidence) || proposal.confidence < CLAUDE_MINIMUM_CONFIDENCE || proposal.confidence > 1 || !proposal.category || !CATEGORIES.includes(proposal.category)) throw new Error("REVIEW_NOT_CLEAR");
+    if (proposal.revision !== context.revision || proposal.policyVersion !== context.policyVersion || proposal.needsMoreContext || !Number.isFinite(proposal.confidence) || proposal.confidence < 0 || proposal.confidence > 1 || !proposal.category || !CATEGORIES.includes(proposal.category)) throw new Error("REVIEW_NOT_CLEAR");
     if (!proposal.reason.trim() || proposal.reason.length > 600 || proposal.evidence.length < 1 || proposal.evidence.length > 3 || !model.startsWith("claude-")) throw new Error("REVIEW_INVALID_EVIDENCE");
     const normalize = (value: string) => value.replace(/\s+/g, " ").trim();
     if (!proposal.evidence.some(evidence => context.triggerIds.includes(evidence.messageId)) || proposal.evidence.some(evidence => {
@@ -181,6 +181,14 @@ class GmailTriageService implements JobService {
   applyReviewed(ids: string[], signal?: AbortSignal): Promise<JobRun> {
     if (!ids.length || ids.length > 100 || ids.some(id => typeof id !== "string")) return Promise.reject(new Error("INVALID_REVIEW_IDS"));
     return this.start({ mode: "apply", reviewedIds: [...new Set(ids)], signal });
+  }
+  async fileUncertain(ids: string[], signal?: AbortSignal): Promise<{ filed: number; failed: number }> {
+    if (!ids.length || ids.length > 100 || ids.some(id => typeof id !== "string" || !id || id.length > 100)) throw new Error("INVALID_UNCERTAIN_IDS");
+    const selected = [...new Set(ids)], accounts = this.gateway.accounts();
+    const pending = selected.filter(id => { const work = this.store.work(id), entry = this.store.uncertainFiling(id); return work?.mode === "apply" && work.kind === "classify" && accounts.includes(work.account) && !!this.store.reviewItem(id) && (!entry || entry.state === "pending"); });
+    if (pending.length) await this.start({ mode: "apply", uncertainIds: pending, signal });
+    const filed = selected.filter(id => { const work = this.store.work(id); return work?.mode === "apply" && accounts.includes(work.account) && this.store.uncertainFiling(id)?.state === "filed"; }).length;
+    return { filed, failed: selected.length - filed };
   }
   readyReviewIds(): string[] { return this.gateway.accounts().flatMap(account => this.store.works(account, "apply").filter(work => work.kind === "classify" && !work.decision?.humanReview && (work.decision?.reviewed || work.decision?.agentReview) && ["classified", "applying"].includes(work.state)).map(work => work.id)); }
   reviewedWorkState(id: string): string | undefined { return this.store.work(id)?.state; }
@@ -201,7 +209,9 @@ class GmailTriageService implements JobService {
     if (!["apply", "dry-run"].includes(input.mode)) return Promise.reject(new Error("INVALID_RUN_MODE"));
     if (input.mode === "apply" && this.config.env.LIFE_OS_TRIAGE_APPLY_ENABLED !== "true") return Promise.reject(new Error("TRIAGE_APPLY_DISABLED"));
     if (this.paused) return Promise.reject(new Error("JOBS_DRAINING"));
-    if (this.running && input.reviewedIds) return Promise.reject(new Error("JOB_ALREADY_RUNNING"));
+    if (input.uncertainIds && (input.mode !== "apply" || input.scheduled || input.reviewedIds || !input.uncertainIds.length || input.uncertainIds.length > 100)) return Promise.reject(new Error("INVALID_UNCERTAIN_IDS"));
+    if (this.running && input.scheduled && (!this.active?.scheduled || this.active.mode !== input.mode || this.active.day !== easternDay(this.now()))) return Promise.reject(new Error("JOB_ALREADY_RUNNING"));
+    if (this.running && (input.reviewedIds || input.uncertainIds)) return Promise.reject(new Error("JOB_ALREADY_RUNNING"));
     if (this.running) return this.active?.mode === input.mode ? this.running : Promise.reject(new Error("JOB_ALREADY_RUNNING"));
     const now = this.now();
     const day = easternDay(now);
@@ -212,7 +222,7 @@ class GmailTriageService implements JobService {
     if (run) {
       run.state = "running"; delete run.finishedAt; delete run.errorCode; run.accounts = []; this.store.saveRun(run);
     } else {
-      run = { id: randomUUID(), name: "gmail-triage", mode: input.mode, scheduled: !!input.scheduled, day, state: "running", startedAt: now.toISOString(), accounts: [], ...(input.reviewedIds ? { reviewedIds: input.reviewedIds } : {}) };
+      run = { id: randomUUID(), name: "gmail-triage", mode: input.mode, scheduled: !!input.scheduled, day, state: "running", startedAt: now.toISOString(), accounts: [], ...(input.reviewedIds ? { reviewedIds: input.reviewedIds } : {}), ...(input.uncertainIds ? { uncertainIds: input.uncertainIds } : {}) };
       this.store.insertRun(run, key);
     }
     this.active = run;
@@ -223,7 +233,8 @@ class GmailTriageService implements JobService {
     const deadline = AbortSignal.timeout(this.deadlineMs);
     const signal = externalSignal ? AbortSignal.any([deadline, externalSignal]) : deadline;
     try {
-      const accounts = this.gateway.accounts().filter(account => !reviewedIds || reviewedIds.some(id => this.store.work(id)?.account === account));
+      const selectedIds = run.uncertainIds ?? reviewedIds;
+      const accounts = this.gateway.accounts().filter(account => !selectedIds || selectedIds.some(id => this.store.work(id)?.account === account));
       if (!accounts.length) throw new Error("NO_GMAIL_ACCOUNTS");
       for (const account of accounts) {
         signal.throwIfAborted();
@@ -235,7 +246,9 @@ class GmailTriageService implements JobService {
         try {
           await this.gateway.verify(account, signal);
           const labels = await this.gateway.labels(account, run.mode === "apply", signal);
-          if (reviewedIds) {
+          if (run.uncertainIds) {
+            for (const id of run.uncertainIds) { const work = this.store.work(id); if (work?.account === account) await this.parkUncertain(work, labels, result, signal); }
+          } else if (reviewedIds) {
             for (const id of reviewedIds) {
               const work = this.store.work(id);
               if (work?.account === account && work.mode === "apply" && work.kind === "classify" && (work.decision?.reviewed || work.decision?.agentReview) && ["classified", "applying"].includes(work.state)) await this.process(work, labels, result, signal, undefined, false);
@@ -243,7 +256,7 @@ class GmailTriageService implements JobService {
           } else await this.account(run, result, labels, signal);
           result.held = this.store.reviews().filter((item) => item.account === account && this.store.work(item.id)?.mode === run.mode).length;
           result.state = result.failed || result.held ? "partial" : "success";
-          if (run.mode === "apply" && result.failed === 0) result.lastSucceededAt = this.now().toISOString();
+          if (run.mode === "apply" && !run.uncertainIds && result.failed === 0) result.lastSucceededAt = this.now().toISOString();
         } catch (error) {
           result.state = error instanceof AuthError ? "auth_blocked" : "failed";
           result.errorCode = errorCode(error); result.failed++;
@@ -258,6 +271,71 @@ class GmailTriageService implements JobService {
       try { this.report(run); } catch { this.logger.error("gmail-triage report write failed", { runId: run.id }); }
     }
     return run;
+  }
+  private parkingPostcondition(entry: UncertainFiling, thread: MailThread, labels: Record<string,string>): boolean {
+    if (!entry.plan || !entry.before || revision(thread) !== entry.revision || !sameLabels(entry.plan.allMessageIds,thread.messages.map(message => message.id))) return false;
+    const selected = new Set(entry.plan.ids);
+    return entry.before.every(before => {
+      const message = thread.messages.find(message => message.id === before.id);
+      const expected = selected.has(before.id) ? [...new Set([...before.labels.filter(label => !entry.plan!.remove.includes(label)),...entry.plan!.add])] : before.labels;
+      return !!message && message.internalDate === before.internalDate && sameLabels(relevantLabels(message.labels,labels),expected);
+    });
+  }
+  private completeParking(entry: UncertainFiling, thread: MailThread, labels: Record<string,string>): boolean {
+    return transaction(this.store.db, () => {
+      const work = this.store.work(entry.workId);
+      if (!work || !this.store.reviewItem(work.id) || !this.store.canFileUncertain(work) || this.store.newerClassification(work) || work.revision !== entry.revision || work.labelRevision !== entry.labelRevision || !this.parkingPostcondition(entry,thread,labels)) return false;
+      // Advance only our proven label transition, never a changed conversation or
+      // unrelated label edit. The original classification/review remains intact.
+      work.labelRevision = hash(thread.messages.map(message => [message.id,relevantLabels(message.labels,labels)]));
+      this.store.saveWork(work); entry.state = "filed"; entry.filedAt = this.now().toISOString(); delete entry.reason;
+      this.store.saveUncertainFiling(entry); return true;
+    });
+  }
+  private async parkUncertain(work: WorkItem, labels: Record<string,string>, result: AccountResult, signal: AbortSignal): Promise<void> {
+    let entry = this.store.uncertainFiling(work.id);
+    if (entry?.state === "filed") { result.processed++; return; }
+    if (entry?.state === "blocked") { result.failed++; return; }
+    const block = (reason: string) => { entry = { ...(entry ?? { workId:work.id,revision:work.revision,labelRevision:work.labelRevision }),state:"blocked",reason }; this.store.saveUncertainFiling(entry); result.failed++; };
+    try {
+      signal.throwIfAborted();
+      if (!this.store.reviewItem(work.id) || !this.store.canFileUncertain(work)) { block("UNCERTAIN_NOT_ELIGIBLE"); return; }
+      if (this.store.newerClassification(work)) { block("UNCERTAIN_REVIEW_SUPERSEDED"); return; }
+      // A pending human selection wins before a new write. An already attempted
+      // parking operation must first reconcile its own durable result.
+      if (!entry?.attemptedAt && this.store.hasHumanIntent(work.id)) { result.failed++; return; }
+      let thread = await this.readThread(work.account,work.threadId,signal);
+      if (entry?.attemptedAt) {
+        if (this.completeParking(entry,thread,labels)) result.processed++;
+        else block("UNCERTAIN_PARKING_REQUIRES_RECONCILIATION");
+        return;
+      }
+      const labelRevision = hash(thread.messages.map(message => [message.id,relevantLabels(message.labels,labels)]));
+      if (revision(thread) !== work.revision || work.labelRevision !== labelRevision) { block("UNCERTAIN_EVIDENCE_CHANGED"); return; }
+      if (!entry?.plan) {
+        const messages = thread.messages.filter(message => work.triggerIds.includes(message.id));
+        if (!labels[UNCERTAIN_LABEL]) throw new Error("GMAIL_LABEL_MISSING");
+        if (!messages.length || messages.length > 1000 || messages.length !== new Set(work.triggerIds).size || messages.some(message => !incoming(message) || !message.labels.includes("INBOX") || message.labels.some(label => ["SPAM","TRASH"].includes(label)))) { block("UNCERTAIN_UNSAFE_CAPTURE"); return; }
+        const plan: MutationPlan = { ids:messages.map(message => message.id),add:[labels[UNCERTAIN_LABEL]!],remove:["INBOX"],allMessageIds:thread.messages.map(message => message.id).sort(),before:messages.map(message => ({id:message.id,internalDate:message.internalDate,labels:relevantLabels(message.labels,labels)})) };
+        entry = {workId:work.id,state:"pending",revision:work.revision,labelRevision,plan,before:thread.messages.map(message => ({id:message.id,internalDate:message.internalDate,labels:relevantLabels(message.labels,labels)}))};
+        this.store.saveUncertainFiling(entry);
+      }
+      thread = await this.readThread(work.account,work.threadId,signal);
+      const current = this.store.work(work.id);
+      if (!current || !this.store.canFileUncertain(current) || this.store.newerClassification(current) || current.revision !== entry.revision || current.labelRevision !== entry.labelRevision || revision(thread) !== entry.revision || hash(thread.messages.map(message => [message.id,relevantLabels(message.labels,labels)])) !== entry.labelRevision || !this.unchanged(entry.plan!,thread,labels)) { block("UNCERTAIN_EVIDENCE_CHANGED"); return; }
+      if (this.store.hasHumanIntent(work.id)) { result.failed++; return; }
+      signal.throwIfAborted();
+      entry.attemptedAt = this.now().toISOString(); this.store.saveUncertainFiling(entry);
+      await this.gateway.modify(work.account,entry.plan!,signal);
+      entry.acknowledged = true; this.store.saveUncertainFiling(entry);
+      const after = await this.readThread(work.account,work.threadId,signal);
+      if (this.completeParking(entry,after,labels)) result.processed++;
+      else block("UNCERTAIN_PARKING_REQUIRES_RECONCILIATION");
+    } catch (error) {
+      if (entry?.state === "pending") { entry.reason = entry.attemptedAt ? "UNCERTAIN_PARKING_PENDING_RECONCILIATION" : errorCode(error); this.store.saveUncertainFiling(entry); }
+      if (error instanceof AuthError || signal.aborted) throw error;
+      result.failed++; this.logger.warn("uncertain filing stopped",{workId:work.id,account:work.account,errorCode:errorCode(error)});
+    }
   }
   private async account(run: JobRun, result: AccountResult, labels: Record<string, string>, signal: AbortSignal): Promise<void> {
     if (run.mode === "apply") await this.backfillLegacyLinks(result.account, signal);
@@ -323,7 +401,7 @@ class GmailTriageService implements JobService {
           work.state = "classified"; this.store.saveWork(work);
         }
         if (work.decision.preferenceEvidence && this.store.preference(work.account, work.decision.preferenceEvidence.sender).version !== work.decision.preferenceEvidence.version) { this.store.review(work, "REVIEW_PREFERENCE_CHANGED"); result.held++; return; }
-        if (work.decision.confidence < JEV_MINIMUM_CONFIDENCE) { this.store.review(work, "LOW_CONFIDENCE"); result.held++; return; }
+        if (!work.decision.agentReview && work.decision.confidence < JEV_MINIMUM_CONFIDENCE) { this.store.review(work, "LOW_CONFIDENCE"); result.held++; return; }
         if (work.mode === "dry-run") { work.state = "applied"; this.store.saveWork(work); result.processed++; return; }
         // Persist relevant preconditions before re-fetching. Unrelated labels and UNREAD do not matter.
         work.plan ??= this.plan(thread, labels, work.decision.category);
@@ -362,7 +440,7 @@ class GmailTriageService implements JobService {
     const messages = eligible(thread);
     const selected = labels[category];
     if (!selected) throw new Error("GMAIL_LABEL_MISSING");
-    return { ids: messages.map((message) => message.id), allMessageIds: thread.messages.map((message) => message.id).sort(), before: messages.map((message) => ({ id: message.id, internalDate: message.internalDate, labels: relevantLabels(message.labels, labels) })), add: [selected, ...(STAR_CATEGORIES.has(category as Category) ? ["STARRED"] : [])], remove: ["INBOX", ...[...CATEGORIES, "ACTION/DONE"].filter((name) => name !== category).map((name) => labels[name]).filter((id): id is string => !!id)] };
+    return { ids: messages.map((message) => message.id), allMessageIds: thread.messages.map((message) => message.id).sort(), before: messages.map((message) => ({ id: message.id, internalDate: message.internalDate, labels: relevantLabels(message.labels, labels) })), add: [selected, ...(STAR_CATEGORIES.has(category as Category) ? ["STARRED"] : [])], remove: ["INBOX", ...(labels[UNCERTAIN_LABEL] ? [labels[UNCERTAIN_LABEL]] : []), ...[...CATEGORIES, "ACTION/DONE"].filter((name) => name !== category).map((name) => labels[name]).filter((id): id is string => !!id)] };
   }
   private unchanged(plan: MutationPlan, thread: MailThread, labels: Record<string, string>): boolean {
     return sameLabels(plan.allMessageIds, thread.messages.map((message) => message.id)) && plan.before.every((before) => { const message = thread.messages.find((item) => item.id === before.id); return message && message.internalDate === before.internalDate && sameLabels(before.labels, relevantLabels(message.labels, labels)); });
@@ -468,7 +546,7 @@ class GmailTriageService implements JobService {
     const sample = [...new Map([...categories.map((group) => group.items[0]!), ...decisions].map((work) => [work.id, work])).values()].slice(0, 20);
     const text = (value: string) => value.replace(/[\r\n`]/g, " ").slice(0, 120);
     const models = [...new Set(decisions.flatMap((work) => work.decision ? [work.decision.model] : []))];
-    const lines = [`## ${run.day} — ${run.mode}`, ``, `Run: ${run.id}`, `Finished: ${run.finishedAt}`, `Mode: ${run.mode}`, `State: ${run.state}`, `Schedule: daily 05:53 ${TIME_ZONE}`, ``, ...run.accounts.map((account) => `- ${account.account}: ${account.state}; ${account.processed} processed, ${account.held} held, ${account.failed} failed, ${account.completed} completed${account.errorCode ? ` (${account.errorCode})` : ""}.`), ``, `### Classification evidence`, ``, `Rubric: ${RUBRIC_VERSION}. Automatic application requires confidence of at least ${JEV_MINIMUM_CONFIDENCE.toFixed(2)}.`, ...(run.mode === "dry-run" ? [`Shadow mode made no Gmail or task changes.`] : []), ``, ...categories.map(({ category, items }) => `- ${category}: ${items.length} decisions; ${items.filter((work) => work.decision!.confidence >= JEV_MINIMUM_CONFIDENCE).length} meet the confidence threshold.`), ``, `### Decision sample (${sample.length} of ${decisions.length})`, ``, ...sample.map((work) => `- \`${work.decision?.category ?? "NEEDS REVIEW"}\` · confidence ${work.decision?.confidence.toFixed(3) ?? "unavailable"} · \`${text(work.subject || "No subject")}\` · ${work.state}${work.reason ? ` (${work.reason})` : ""} · [Open email](https://mail.google.com/mail/u/?authuser=${encodeURIComponent(work.account)}#all/${encodeURIComponent(work.threadId)})`), ``, `Pending reviews: ${this.reviews().length}`, ``, `Held mail remains in its current Gmail state. Review using life-os triage review list.`, ``];
+    const lines = [`## ${run.day} — ${run.mode}`, ``, `Run: ${run.id}`, `Finished: ${run.finishedAt}`, `Mode: ${run.mode}`, `Operation: ${run.uncertainIds ? "Uncertain filing" : "Gmail triage"}`, `State: ${run.state}`, `Schedule: daily 05:53 ${TIME_ZONE}`, ``, ...run.accounts.map((account) => `- ${account.account}: ${account.state}; ${account.processed} processed, ${account.held} held, ${account.failed} failed, ${account.completed} completed${account.errorCode ? ` (${account.errorCode})` : ""}.`), ``, `### Classification evidence`, ``, `Rubric: ${RUBRIC_VERSION}. Jev automatic application requires confidence of at least ${JEV_MINIMUM_CONFIDENCE.toFixed(2)}. Claude reviews use validated best-fit decisions.`, ...(run.mode === "dry-run" ? [`Shadow mode made no Gmail or task changes.`] : []), ``, ...categories.map(({ category, items }) => `- ${category}: ${items.length} decisions; ${items.filter((work) => work.decision!.confidence >= JEV_MINIMUM_CONFIDENCE).length} meet the confidence threshold.`), ``, `### Decision sample (${sample.length} of ${decisions.length})`, ``, ...sample.map((work) => `- \`${work.decision?.category ?? "NEEDS REVIEW"}\` · confidence ${work.decision?.confidence.toFixed(3) ?? "unavailable"} · \`${text(work.subject || "No subject")}\` · ${work.state}${work.reason ? ` (${work.reason})` : ""} · [Open email](https://mail.google.com/mail/u/?authuser=${encodeURIComponent(work.account)}#all/${encodeURIComponent(work.threadId)})`), ``, `Pending reviews: ${this.reviews().length}`, ``, `Unresolved mail may be archived under Uncertain while remaining available for optional review. Review using life-os triage review list.`, ``];
     lines.splice(lines.indexOf("### Classification evidence") + 2, 0, `Validated models: ${models.join(", ") || "none yet"}.`);
     const path=join(this.config.triageLogDir,"email.md");
     let prior="";try {prior=readFileSync(path,"utf8").replace(/^# [^\n]*\n/,"").trim();} catch {}
