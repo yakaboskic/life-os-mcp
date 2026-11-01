@@ -124,7 +124,14 @@ class GmailTriageService implements JobService {
   reviewedWorkState(id: string): string | undefined { return this.store.work(id)?.state; }
   status(): JobStatus {
     const history = this.store.history(1000);
-    return { activeRun: this.active, lastRun: history[0] ?? null, lastSuccessfulRun: history.find((run) => run.state === "success" && run.mode === "apply") ?? null, nextRunAt: nextRunAt(this.now()), schedule: "05:53 daily", timeZone: TIME_ZONE, accounts: (this.active ?? history[0])?.accounts ?? [], reviewCount: this.reviews().length, paused: this.paused, configuredAccounts: this.gateway.accounts() };
+    const accounts = this.gateway.accounts();
+    // A completed scheduled run can correctly hold uncertain mail without failing.
+    const lastSuccessfulRun = history.find(run => run.scheduled && run.mode === "apply" && run.finishedAt &&
+      ["success", "partial"].includes(run.state) && run.accounts.length > 0 &&
+      accounts.every(account => run.accounts.some(result => result.account === account &&
+        ["success", "partial"].includes(result.state) && result.failed === 0))) ?? null;
+    const reviewCount = this.reviews().filter(item => item.mode === "apply" && accounts.includes(item.account) && !item.resolvedAt).length;
+    return { activeRun: this.active, lastRun: history[0] ?? null, lastSuccessfulRun, nextRunAt: nextRunAt(this.now()), schedule: "05:53 daily", timeZone: TIME_ZONE, accounts: (this.active ?? history[0])?.accounts ?? [], reviewCount, paused: this.paused, configuredAccounts: accounts };
   }
   async drain(): Promise<void> { this.paused = true; if (this.running) await this.running; }
   resume(): void { this.paused = false; }

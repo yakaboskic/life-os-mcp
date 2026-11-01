@@ -51,6 +51,7 @@ export function createWebServer(config: LifeOsConfig, jobSnapshot?: () => {statu
       res.writeHead(200,{"content-type":"application/json","cache-control":"no-store"}).end(JSON.stringify({
         generatedAt:new Date().toISOString(),schedule:{timeZone:status.timeZone,localTime:"05:53",nextRunAt:status.nextRunAt},
         runs:runs.map(run=>({...run,status:run.state,accounts:run.accounts.map(account=>({...account,status:account.state}))})),reviewCount:status.reviewCount,
+        lastSuccessfulRun:status.lastSuccessfulRun,
       }));
       return;
     }

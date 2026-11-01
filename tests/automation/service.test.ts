@@ -6,7 +6,7 @@ import { loadConfig } from "../../src/core/config.js";
 import { closeDatabase, openDatabase } from "../../src/state/database.js";
 import { TrackStore } from "../../src/toolsets/track/store.js";
 import { createAutomationService } from "../../src/automation/service.js";
-import { AutomationStore, LIMITS } from "../../src/automation/store.js";
+import { AutomationStore, automationLimits, LIMITS } from "../../src/automation/store.js";
 import type { AutomationProvider, BriefDeliveryGateway, BriefProposal } from "../../src/automation/types.js";
 import type { AgentReviewContext, AgentReviewProposal, JobRun, JobService, ReviewItem } from "../../src/jobs/types.js";
 const logger = { info() {}, warn() {}, error() {}, debug() {} };
@@ -14,8 +14,8 @@ const owner = "owner@example.com", revision = "a".repeat(64);
 const dirs: ReturnType<typeof loadConfig>[] = [];
 const run = (id = "triage1"): JobRun => ({ id, name: "gmail-triage", mode: "apply", scheduled: true, day: "2026-10-18", state: "partial", startedAt: "2026-10-18T09:53:00Z", finishedAt: "2026-10-18T10:00:00Z", accounts: [{ account: owner, state: "partial", processed: 1, held: 1, failed: 0, completed: 0 }] });
 const context = (id: string): AgentReviewContext => ({ itemId: id, revision, policyVersion: "lifeos-review-v1", account: owner, now: "2026-10-18T10:10:00Z", triggerIds: ["m1"], thread: { id: "thread1", messages: [{ id: "m1", internalDate: 1, labels: ["INBOX"], from: "sender@example.com", to: owner, subject: "Action", body: "Please review the proposal today.", truncated: false, attachments: false }] } });
-function fixture() {
-  const config = loadConfig({ LIFE_OS_HOME: mkdtempSync(join(tmpdir(), "lifeos-automation-")), LIFE_OS_BRIEF_ACCOUNT: owner, LIFE_OS_BRIEF_RECIPIENT: owner }); dirs.push(config);
+function fixture(env: Record<string, string> = {}) {
+  const config = loadConfig({ LIFE_OS_HOME: mkdtempSync(join(tmpdir(), "lifeos-automation-")), LIFE_OS_BRIEF_ACCOUNT: owner, LIFE_OS_BRIEF_RECIPIENT: owner, ...env }); dirs.push(config);
   let now = new Date("2026-10-18T11:10:00Z"), paused = false;
   const reviews: ReviewItem[] = [{ id: "work1", account: owner, threadId: "thread1", subject: "Action", sender: "sender@example.com", reason: "LOW_CONFIDENCE", createdAt: now.toISOString(), mode: "apply", revision, reviewable: true }];
   const states = new Map<string, string>([["work1", "needs_review"]]); const applied: string[][] = [], decisions: AgentReviewProposal[] = [];
@@ -32,6 +32,11 @@ function fixture() {
   return { config, service, deps, provider, jobs, reviews, applied, decisions, states, counts: () => ({ reviewCalls, briefCalls, sends, reconciles }), lost(value = true) { lost = value; }, found(value: boolean) { found = value; }, clear(value: boolean) { clear = value; }, advance(ms: number) { now = new Date(now.getTime() + ms); } };
 }
 afterEach(() => { for (const config of dirs.splice(0)) { closeDatabase(config); rmSync(config.home, { recursive: true, force: true }); } });
+const catchup = { LIFE_OS_REVIEW_MAX_PER_DAY: "100", LIFE_OS_AUTOMATION_MAX_CALLS: "101", LIFE_OS_AUTOMATION_MAX_INPUT_TOKENS: "1000000", LIFE_OS_AUTOMATION_MAX_OUTPUT_TOKENS: "100000" };
+function addReviews(f: ReturnType<typeof fixture>, total: number) {
+  const template = f.reviews[0]!;
+  for (let i = 2; i <= total; i++) f.reviews.push({ ...template, id: `work${i}`, threadId: `thread${i}` });
+}
 
 describe("durable automation", () => {
   it("is disabled by default and deduplicates commands with payload conflicts rejected", async () => {
@@ -110,5 +115,103 @@ describe("durable automation", () => {
   it("rejects fabricated briefing source references without publishing or sending", async () => {
     const f = fixture(); f.provider.brief = async () => ({ value: { title: "Fake", summary: "Fake", priorities: [{ title: "Fake", detail: "Fake", sourceIds: ["task:invented"] }], notes: [] }, model: f.provider.model, inputTokens: 10, outputTokens: 10 });
     await f.service.command("automation.run", { kind: "brief" }, "request-001", "owner"); await f.service.tick(); expect(f.service.snapshot().runs[0]?.errorCode).toBe("BRIEF_INVALID_SOURCE"); expect(f.service.snapshot().briefing).toBeNull(); expect(f.counts().sends).toBe(0);
+  });
+  it("preserves the default twenty-review daily cap without background expansion", async () => {
+    const f = fixture(); addReviews(f, 30);
+    await f.service.command("automation.schedule", { enabled: true }, "schedule-001", "owner");
+    for (let i = 0; i < 4; i++) await f.service.tick();
+    expect(f.counts()).toMatchObject({ reviewCalls: 20, briefCalls: 1, sends: 1 });
+    expect(f.service.snapshot().usage).toMatchObject({ calls: 21, reviewCalls: 20, maxReviewCalls: 20, maxCalls: 24 });
+    expect(f.service.snapshot().runs).toHaveLength(1);
+  });
+  it("drains sequential durable batches only after the brief and stops at the approved daily quota across restart", async () => {
+    const f = fixture(catchup); addReviews(f, 105);
+    await f.service.command("automation.schedule", { enabled: true }, "schedule-001", "owner");
+    await f.service.tick(); expect(f.counts()).toMatchObject({ reviewCalls: 20, briefCalls: 1, sends: 1 });
+    const restarted = createAutomationService(f.config, logger, f.deps);
+    for (let i = 0; i < 8; i++) { restarted.afterTriage(run()); await restarted.tick(); }
+    expect(f.counts()).toMatchObject({ reviewCalls: 100, briefCalls: 1, sends: 1 });
+    expect(f.applied.map(ids => ids.length)).toEqual([20, 20, 20, 20, 20]);
+    expect(new Set(f.applied.flat()).size).toBe(100);
+    expect(restarted.snapshot().usage).toMatchObject({ calls: 101, reviewCalls: 100 });
+    expect(restarted.snapshot().runs).toHaveLength(5);
+    expect(restarted.snapshot().backlog).toEqual({ total: 5, awaitingAgent: 5, needsDecision: 0, needsContext: 0 });
+  });
+  it("waits for bounded brief-stage retries without repeating reviews or sending before valid output", async () => {
+    const f = fixture(catchup); addReviews(f, 45); let attempts = 0; const brief = f.provider.brief;
+    f.provider.brief = async (...args) => { if (++attempts < 3) throw Error("CLAUDE_INVALID_STRUCTURED_OUTPUT"); return brief(...args); };
+    await f.service.command("automation.schedule", { enabled: true }, "schedule-001", "owner");
+    await f.service.tick(); expect(f.service.snapshot().runs[0]).toMatchObject({ state: "retry_wait", stage: "brief" });
+    await f.service.tick(); expect(f.counts()).toMatchObject({ reviewCalls: 20, sends: 0 }); expect(attempts).toBe(1);
+    f.advance(60_000); await f.service.tick(); expect(f.service.snapshot().runs).toHaveLength(1); expect(attempts).toBe(2);
+    f.advance(120_000); await f.service.tick(); expect(attempts).toBe(3); expect(f.counts()).toMatchObject({ reviewCalls: 20, sends: 1 });
+    expect(f.service.snapshot().usage.calls).toBe(23);
+    await f.service.tick(); expect(f.counts()).toMatchObject({ reviewCalls: 40, sends: 1 });
+  });
+  it("allows review catch-up after the brief exhausts validation retries, without replaying failed brief calls", async () => {
+    const f = fixture(catchup); addReviews(f, 45); let attempts = 0;
+    f.provider.brief = async () => { attempts++; throw Error("CLAUDE_INVALID_STRUCTURED_OUTPUT"); };
+    await f.service.command("automation.schedule", { enabled: true }, "schedule-001", "owner");
+    await f.service.tick(); f.advance(60_000); await f.service.tick(); f.advance(120_000); await f.service.tick();
+    expect(f.service.snapshot().runs[0]).toMatchObject({ state: "failed", stage: "brief", attempts: 3 });
+    await f.service.tick(); expect(f.counts()).toMatchObject({ reviewCalls: 40, sends: 0 }); expect(attempts).toBe(3);
+  });
+  it("stops continuation chains after authentication failure instead of spending on fresh retry chains", async () => {
+    const f = fixture(catchup); addReviews(f, 45);
+    await f.service.command("automation.schedule", { enabled: true }, "schedule-001", "owner"); await f.service.tick();
+    f.provider.review = async () => { throw Error("CLAUDE_LOGIN_REQUIRED"); };
+    await f.service.tick(); expect(f.service.snapshot().runs[0]).toMatchObject({ state: "failed", errorCode: "CLAUDE_LOGIN_REQUIRED" });
+    for (let i = 0; i < 4; i++) await f.service.tick();
+    expect(f.service.snapshot().runs).toHaveLength(2); expect(f.service.snapshot().usage.calls).toBe(22); expect(f.counts().sends).toBe(1);
+  });
+  it("advances a zero-call stale-context batch without an unbounded continuation loop", async () => {
+    const f = fixture(catchup); addReviews(f, 125);
+    const getContext = f.jobs.reviewContext!;
+    f.jobs.reviewContext = async (...args) => {
+      const number = Number(args[0].replace("work", ""));
+      if (number >= 21 && number <= 40) throw Error("REVIEW_EVIDENCE_CHANGED");
+      return getContext(...args);
+    };
+    await f.service.command("automation.schedule", { enabled: true }, "schedule-001", "owner");
+    await f.service.tick(); await f.service.tick();
+    expect(f.counts().reviewCalls).toBe(20); expect(f.service.snapshot().runs[0]).toMatchObject({ state: "partial", failed: 20 });
+    for (let i = 0; i < 6; i++) await f.service.tick();
+    expect(f.counts()).toMatchObject({ reviewCalls: 80, sends: 1 }); expect(f.service.snapshot().runs).toHaveLength(5);
+    expect(f.service.snapshot().backlog).toEqual({ total: 45, awaitingAgent: 25, needsDecision: 20, needsContext: 0 });
+  });
+  it("keeps ambiguous and incomplete evidence held and reports the untruncated configured-account backlog", async () => {
+    const f = fixture(catchup); addReviews(f, 205); f.clear(false);
+    f.reviews.push({ ...f.reviews[0]!, id: "context", reviewable: false, reason: "INSUFFICIENT_OR_TRUNCATED_CONTEXT" }, { ...f.reviews[0]!, id: "dry", mode: "dry-run" }, { ...f.reviews[0]!, id: "other", account: "other@example.com" });
+    await f.service.command("automation.run", { kind: "review" }, "request-001", "owner"); await f.service.tick();
+    const snapshot = f.service.snapshot(); expect(snapshot.reviews).toHaveLength(200);
+    expect(snapshot.backlog).toEqual({ total: 206, awaitingAgent: 185, needsDecision: 20, needsContext: 1 });
+    expect(f.applied).toHaveLength(0); expect(f.counts().reviewCalls).toBe(20);
+  });
+  it("does not continue when token capacity is exhausted and never exceeds an independent review-call ceiling", async () => {
+    const f = fixture({ ...catchup, LIFE_OS_REVIEW_MAX_PER_DAY: "25" }); addReviews(f, 45);
+    await f.service.command("automation.schedule", { enabled: true }, "schedule-001", "owner");
+    await f.service.tick(); await f.service.tick(); await f.service.tick();
+    expect(f.counts()).toMatchObject({ reviewCalls: 25, sends: 1 }); expect(f.service.snapshot().usage.calls).toBe(26);
+    const other = fixture(catchup); addReviews(other, 45);
+    const store = new AutomationStore(openDatabase(other.config), automationLimits(other.config.env));
+    store.reserve("2026-10-18", 930_000, 100, "brief");
+    await other.service.command("automation.schedule", { enabled: true }, "schedule-001", "owner");
+    for (let i = 0; i < 3; i++) await other.service.tick();
+    expect(other.counts()).toMatchObject({ reviewCalls: 0, sends: 1 }); expect(other.service.snapshot().runs).toHaveLength(1);
+  });
+  it("conservatively seeds legacy reservations and keeps new brief-only days distinct across restart", () => {
+    const f = fixture(catchup), db = openDatabase(f.config);
+    db.prepare("INSERT INTO automation_usage VALUES(?,?,?,?)").run("2026-10-17", 37, 100_000, 10_000);
+    const store = new AutomationStore(db, automationLimits(f.config.env));
+    expect(store.usage("2026-10-17")).toMatchObject({ calls: 37, reviewCalls: 37 });
+    store.reserve("2026-10-18", 1000, 100, "brief");
+    expect(new AutomationStore(db, automationLimits(f.config.env)).usage("2026-10-18")).toMatchObject({ calls: 1, reviewCalls: 0 });
+    const bounded = new AutomationStore(db, { ...automationLimits(f.config.env), maxReviewCalls: 37 });
+    expect(() => bounded.reserve("2026-10-17", 1, 1, "review")).toThrow("DAILY_MODEL_BUDGET_EXHAUSTED");
+  });
+  it("rejects invalid or over-ceiling operational quotas", () => {
+    expect(automationLimits({})).toEqual(LIMITS);
+    for (const [name, value] of Object.entries({ LIFE_OS_REVIEW_MAX_PER_DAY: "101", LIFE_OS_AUTOMATION_MAX_CALLS: "102", LIFE_OS_AUTOMATION_MAX_INPUT_TOKENS: "1000001", LIFE_OS_AUTOMATION_MAX_OUTPUT_TOKENS: "100001" })) expect(() => automationLimits({ [name]: value })).toThrow("AUTOMATION_LIMIT_INVALID");
+    for (const value of ["0", "-1", "NaN", "1.5", "", "100garbage"]) expect(() => automationLimits({ LIFE_OS_REVIEW_MAX_PER_DAY: value })).toThrow("AUTOMATION_LIMIT_INVALID");
   });
 });

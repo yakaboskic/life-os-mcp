@@ -3,7 +3,7 @@ import { createServer } from "node:http";
 import { chmodSync, existsSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { z } from "zod";
-import { DEFAULT_CLAUDE_MODEL, briefJsonSchema, briefPrompt, briefSchema, reviewJsonSchema, reviewPrompt, reviewSchema } from "../automation/provider.js";
+import { DEFAULT_CLAUDE_MODEL, StructuredOutputError, briefJsonSchema, briefPrompt, briefSchema, reviewJsonSchema, reviewPrompt, reviewSchema, validateStructuredOutput } from "../automation/provider.js";
 import type { ProviderResult } from "../automation/types.js";
 
 type Kind="review"|"brief";
@@ -27,9 +27,9 @@ function failure(text:string):string {
 }
 export function parseClaudeResult(output:string,kind:Kind,model:string):ProviderResult<unknown> {
   let raw:any;try{raw=JSON.parse(output);}catch{throw new Error("CLAUDE_INVALID_RESPONSE");}
+  if(raw?.subtype==="error_max_structured_output_retries") throw new StructuredOutputError([{path:[],code:"custom"}]);
   if(raw.is_error || raw.subtype!=="success") throw new Error(failure(JSON.stringify(raw)));
-  let value:unknown;
-  try{value=(kind==="review"?reviewSchema:briefSchema).parse(raw.structured_output);}catch{throw new Error("CLAUDE_INVALID_STRUCTURED_OUTPUT");}
+  const value=kind==="review"?validateStructuredOutput(reviewSchema,raw.structured_output):validateStructuredOutput(briefSchema,raw.structured_output);
   const usage=raw.usage;
   if(!usage||![usage.input_tokens,usage.output_tokens].every(n=>Number.isSafeInteger(n)&&n>=0)) throw new Error("CLAUDE_INVALID_USAGE");
   const cached=[usage.cache_read_input_tokens??0,usage.cache_creation_input_tokens??0];
@@ -73,14 +73,19 @@ export function createClaudeRunner(options:RunnerOptions) {
     if(req.headers["content-type"]!=="application/json"){res.writeHead(415).end();return;}
     busy=true;
     const controller=new AbortController();res.on("close",()=>{if(!res.writableEnded)controller.abort();});
+    let kind:Kind|undefined;
     try {
       const chunks:Buffer[]=[];let bytes=0;
       for await(const chunk of req){bytes+=chunk.length;if(bytes>128_000)throw new Error("CLAUDE_INPUT_TOO_LARGE");chunks.push(Buffer.from(chunk));}
       let body:z.infer<typeof requestSchema>;try{body=requestSchema.parse(JSON.parse(Buffer.concat(chunks).toString("utf8")));}catch{throw new Error("CLAUDE_REQUEST_INVALID");}
+      kind=body.kind;
       if(body.model!==(options.model??DEFAULT_CLAUDE_MODEL))throw new Error("CLAUDE_MODEL_MISMATCH");
       const result=await (options.run?options.run(body.kind,body.input,controller.signal):runClaude(options,body.kind,body.input,controller.signal));
       res.end(JSON.stringify(result));
-    } catch(error){if(!res.destroyed)res.writeHead(503).end(JSON.stringify({error:error instanceof Error&&/^CLAUDE_[A-Z0-9_]+$/.test(error.message)?error.message:"CLAUDE_RUNNER_FAILED"}));}
+    } catch(error){
+      if(error instanceof StructuredOutputError) console.error("LifeOS Claude structured output rejected",JSON.stringify({kind,issues:error.issues}));
+      if(!res.destroyed)res.writeHead(503).end(JSON.stringify({error:error instanceof Error&&/^CLAUDE_[A-Z0-9_]+$/.test(error.message)?error.message:"CLAUDE_RUNNER_FAILED"}));
+    }
     finally{busy=false;}
   });
 }

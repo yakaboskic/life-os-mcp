@@ -10,10 +10,10 @@ import { TrackStore } from "../toolsets/track/store.js";
 import { GmailAccountManager, type GmailManagerLike } from "../toolsets/gmail/client.js";
 import { easternDay } from "../jobs/service.js";
 import { CATEGORIES, type Category, type JobRun, type JobService } from "../jobs/types.js";
-import { ClaudeProvider, REVIEW_MAX_TOKENS, BRIEF_MAX_TOKENS, reviewSchema, briefSchema } from "./provider.js";
+import { ClaudeProvider, REVIEW_MAX_TOKENS, BRIEF_MAX_TOKENS, reviewSchema, briefSchema, StructuredOutputError } from "./provider.js";
 import { ClaudeCodeProvider } from "./claude-code.js";
 import { GmailBriefDelivery } from "./delivery.js";
-import { AutomationStore, digest, type StoredRun } from "./store.js";
+import { AutomationStore, automationLimits, digest, type StoredRun } from "./store.js";
 import { AUTOMATION_POLICY, type AutomationService, type AutomationSnapshot, type AutomationProvider, type BriefDeliveryGateway, type BriefDelivery, type BriefInput, type BriefSource, type BriefingArtifact, type ProviderResult } from "./types.js";
 export type { AutomationService, AutomationSnapshot } from "./types.js";
 
@@ -34,6 +34,7 @@ export function scheduleTime(now: Date, localTime: string, next = true): string 
 }
 function code(error: unknown): string { return error instanceof Error && /^[A-Z][A-Z0-9_]+$/.test(error.message) ? error.message : error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name) ? "AUTOMATION_DEADLINE" : "AUTOMATION_UPSTREAM_FAILURE"; }
 const safeText = (text: string) => text.replace(/[<>]/g, "").replace(/\]\(/g, "] (").replace(/[\r\n]+/g, " ").trim();
+const REVIEW_BATCH_SIZE = 20;
 
 export function createAutomationService(config: LifeOsConfig, logger: Logger, dependencies: AutomationDependencies): AutomationService { return new DurableAutomationService(config, logger, dependencies); }
 class DurableAutomationService implements AutomationService {
@@ -42,7 +43,7 @@ class DurableAutomationService implements AutomationService {
   private controller: AbortController | null = null;
   private readonly account: string; private readonly recipient: string;
   constructor(private readonly config: LifeOsConfig, private readonly logger: Logger, private readonly deps: AutomationDependencies) {
-    this.store = new AutomationStore(openDatabase(config)); this.store.recover(new Date().toISOString()); this.jobs = deps.jobs;
+    this.store = new AutomationStore(openDatabase(config), automationLimits(config.env)); this.store.recover(new Date().toISOString()); this.jobs = deps.jobs;
     this.provider = deps.provider ?? (config.env.LIFE_OS_AGENT_PROVIDER === "claude-code" ? new ClaudeCodeProvider(config) : new ClaudeProvider(config)); this.track = deps.track ?? new TrackStore(config); this.now = deps.now ?? (() => new Date());
     this.account = (config.env.LIFE_OS_BRIEF_ACCOUNT ?? "").toLowerCase(); this.recipient = (config.env.LIFE_OS_BRIEF_RECIPIENT ?? "").toLowerCase();
     this.delivery = deps.delivery ?? new GmailBriefDelivery(deps.manager ?? new GmailAccountManager({ config, logger }), this.account, this.recipient);
@@ -52,11 +53,18 @@ class DurableAutomationService implements AutomationService {
   private mailConfigured(): boolean { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(this.account) && this.account === this.recipient && this.jobs.status().configuredAccounts.includes(this.account); }
   snapshot(): AutomationSnapshot {
     const settings = this.store.settings(); const accounts = this.jobs.status().configuredAccounts;
-    const reviews = this.jobs.reviews().filter(item => item.mode === "apply" && accounts.includes(item.account)).slice(0, 200).map(item => {
+    const allReviews = this.jobs.reviews().filter(item => item.mode === "apply" && accounts.includes(item.account));
+    const backlog = { total: allReviews.length, awaitingAgent: 0, needsDecision: 0, needsContext: 0 };
+    for (const item of allReviews) {
+      if (item.reason === "INSUFFICIENT_OR_TRUNCATED_CONTEXT") backlog.needsContext++;
+      else if (item.reviewable && !this.store.reviewRecord(this.store.reviewKey(item.id, item.revision!, AUTOMATION_POLICY))) backlog.awaitingAgent++;
+      else backlog.needsDecision++;
+    }
+    const reviews = allReviews.slice(0, 200).map(item => {
       const record = item.revision ? this.store.reviewRecord(this.store.reviewKey(item.id, item.revision, AUTOMATION_POLICY)) : undefined;
       return { ...item, ...(record ? { agentReview: { category: (record.category ?? null) as Category | null, reason: record.reason, model: record.model, createdAt: record.createdAt } } : {}) };
     });
-    return { configured: this.provider.configured() && this.mailConfigured(), model: this.provider.model, paused: this.paused, activeCount: this.activeCount, reviews, runs: this.store.runs(), schedule: { ...settings, nextRunAt: scheduleTime(this.now(), settings.localTime) }, briefing: this.store.briefing() ?? null, deliveries: this.store.deliveries(), usage: this.store.usage(easternDay(this.now())), recentDecisions: this.store.decisions().filter(item => accounts.includes(item.account)).slice(0, 20) };
+    return { configured: this.provider.configured() && this.mailConfigured(), model: this.provider.model, paused: this.paused, activeCount: this.activeCount, reviews, backlog, runs: this.store.runs(), schedule: { ...settings, nextRunAt: scheduleTime(this.now(), settings.localTime) }, briefing: this.store.briefing() ?? null, deliveries: this.store.deliveries(), usage: this.store.usage(easternDay(this.now())), recentDecisions: this.store.decisions().filter(item => accounts.includes(item.account)).slice(0, 20) };
   }
   async command(action: "automation.run" | "automation.schedule" | "review.resolve", input: unknown, requestId: string, actor: string): Promise<AutomationSnapshot> {
     if (!/^[A-Za-z0-9._:-]{8,128}$/.test(requestId) || !actor || actor.length > 320) throw new Error("AUTOMATION_INVALID_REQUEST");
@@ -93,12 +101,39 @@ class DurableAutomationService implements AutomationService {
     if (settings.enabled && now.toISOString() >= scheduleTime(now, settings.localTime, false)) this.store.enqueue(`daily:${easternDay(now)}`, "daily", easternDay(now), now.toISOString(), "schedule:fallback");
     const uncertain = this.mailConfigured() ? this.store.deliveries(100).find(entry => entry.state === "uncertain" && (entry.reconcileAttempts ?? 0) < 12 && (!entry.nextReconcileAt || entry.nextReconcileAt <= now.toISOString())) : undefined;
     if (uncertain) this.store.enqueue(`reconcile:${uncertain.id}:${uncertain.reconcileAttempts ?? 0}`, "brief", uncertain.day, now.toISOString(), "delivery:reconcile");
+    this.enqueueReviewContinuation(now);
     const run = this.store.claim(now.toISOString()); if (!run) return Promise.resolve();
     this.controller = new AbortController();
     this.running = this.execute(run, this.controller.signal).finally(() => { this.running = null; this.controller = null; }); return this.running;
   }
   async drain(): Promise<void> { this.paused = true; this.controller?.abort(); if (this.running) await this.running; }
   resume(): void { this.paused = false; }
+  private enqueueReviewContinuation(now: Date): void {
+    const settings = this.store.settings(), day = easternDay(now);
+    if (!settings.enabled || !settings.reviewEnabled || !this.provider.configured()) return;
+    const runs = this.store.runsForDay(day);
+    if (runs.some(run => ["queued", "running", "retry_wait"].includes(run.state))) return;
+    const daily = runs.find(run => run.kind === "daily" && run.actor.startsWith("schedule:"));
+    // Finish the daily brief (including its bounded retries) before spending on catch-up.
+    if (!daily || daily.stage === "review" || !["succeeded", "partial", "failed"].includes(daily.state)) return;
+    if (daily.state === "failed" && daily.errorCode !== "CLAUDE_INVALID_STRUCTURED_OUTPUT") return;
+    // A provider/auth/quota failure is not permission to start a fresh retry chain.
+    if (runs.some(run => run.actor === "schedule:review-backlog" && run.state === "failed")) return;
+    const usage = this.store.usage(day);
+    if (!this.reviewCapacity(usage, false)) return;
+    const continuations = runs.filter(run => run.actor === "schedule:review-backlog").length;
+    // Also bound Gmail-only context checks: stale candidates can consume zero model
+    // calls. A durable ordinal makes progress without an unlimited zero-call loop.
+    if (continuations + 1 >= Math.ceil(usage.maxReviewCalls / REVIEW_BATCH_SIZE)) return;
+    const accounts = this.jobs.status().configuredAccounts;
+    if (!this.jobs.reviews().some(item => item.mode === "apply" && accounts.includes(item.account) && item.reviewable && !this.store.reviewRecord(this.store.reviewKey(item.id, item.revision!, AUTOMATION_POLICY)))) return;
+    this.store.enqueue(`review-backlog:${day}:${continuations + 1}`, "review", day, now.toISOString(), "schedule:review-backlog");
+  }
+  private reviewCapacity(usage: ReturnType<AutomationStore["usage"]>, reserveBrief: boolean): boolean {
+    return usage.reviewCalls < usage.maxReviewCalls && usage.calls < usage.maxCalls - Number(reserveBrief)
+      && usage.inputTokens <= usage.maxInputTokens - (reserveBrief ? 160_000 : 80_000)
+      && usage.outputTokens <= usage.maxOutputTokens - REVIEW_MAX_TOKENS - (reserveBrief ? BRIEF_MAX_TOKENS : 0);
+  }
   private assertClaim(run: StoredRun): void { if (!this.store.fenced(run)) throw new Error("AUTOMATION_STALE_CLAIM"); }
   private async execute(run: StoredRun, cancelled: AbortSignal): Promise<void> {
     const signal = AbortSignal.any([cancelled, AbortSignal.timeout(this.deps.deadlineMs ?? 12 * 60_000)]);
@@ -117,16 +152,16 @@ class DurableAutomationService implements AutomationService {
       if (!this.store.fenced(run)) return;
       const errorCode = code(error); run.errorCode = errorCode;
       if (cancelled.aborted) { run.state = "queued"; run.errorCode = "AUTOMATION_DRAINED"; return; }
-      const retryable = /^(CLAUDE_HTTP_(429|5\d\d)|CLAUDE_RUNNER_(UNAVAILABLE|BUSY)|AUTOMATION_UPSTREAM_FAILURE|AUTOMATION_DEADLINE|JOBS_BUSY|JOB_ALREADY_RUNNING)$/.test(errorCode);
+      const retryable = /^(CLAUDE_HTTP_(429|5\d\d)|CLAUDE_RUNNER_(UNAVAILABLE|BUSY)|AUTOMATION_UPSTREAM_FAILURE|AUTOMATION_DEADLINE|JOBS_BUSY|JOB_ALREADY_RUNNING)$/.test(errorCode) || run.stage === "brief" && errorCode === "CLAUDE_INVALID_STRUCTURED_OUTPUT";
       run.state = retryable && run.attempts < 3 ? "retry_wait" : "failed";
       if (run.state === "retry_wait") run.nextAttemptAt = new Date(this.now().getTime() + run.attempts * 60_000).toISOString(); else run.finishedAt = this.now().toISOString();
-      this.logger.warn("automation run stopped", { runId: run.id, errorCode });
+      this.logger.warn("automation run stopped", { runId: run.id, errorCode, ...(error instanceof StructuredOutputError ? { issues: error.issues } : {}) });
     } finally { if (this.store.fenced(run)) { delete run.claim; this.store.saveRun(run); } }
   }
   private async model<T>(run: StoredRun, input: unknown, output: number, call: () => Promise<ProviderResult<T>>): Promise<ProviderResult<T>> {
     this.assertClaim(run); const day = easternDay(this.now());
     // UTF-8 byte count plus system/schema overhead is a conservative input-token reservation.
-    const reserved = Buffer.byteLength(JSON.stringify(input)) + 8000; this.store.reserve(day, reserved, output);
+    const reserved = Buffer.byteLength(JSON.stringify(input)) + 8000; this.store.reserve(day, reserved, output, run.stage === "review" ? "review" : "brief");
     const result = await call(); this.assertClaim(run);
     if (![result.inputTokens, result.outputTokens].every(value => Number.isSafeInteger(value) && value >= 0)) throw new Error("CLAUDE_INVALID_USAGE");
     this.store.settle(day, reserved, output, result.inputTokens, result.outputTokens); return result;
@@ -138,13 +173,14 @@ class DurableAutomationService implements AutomationService {
     if (!manual) {
       if (!this.provider.configured()) throw new Error("CLAUDE_KEY_MISSING");
       const accounts = this.jobs.status().configuredAccounts;
-      const candidates = this.jobs.reviews().filter(item => item.mode === "apply" && accounts.includes(item.account) && item.reviewable && !this.store.reviewRecord(this.store.reviewKey(item.id, item.revision!, AUTOMATION_POLICY))).slice(0, 20);
+      const candidates = this.jobs.reviews().filter(item => item.mode === "apply" && accounts.includes(item.account) && item.reviewable && !this.store.reviewRecord(this.store.reviewKey(item.id, item.revision!, AUTOMATION_POLICY))).slice(0, REVIEW_BATCH_SIZE);
       for (const item of candidates) {
         signal.throwIfAborted();
         const key = this.store.reviewKey(item.id, item.revision!, AUTOMATION_POLICY); if (this.store.reviewRecord(key)) continue;
         try {
           const usage = this.store.usage(easternDay(this.now()));
-          if (usage.calls >= usage.maxCalls - 1 || usage.inputTokens > usage.maxInputTokens - 160_000 || usage.outputTokens > usage.maxOutputTokens - BRIEF_MAX_TOKENS - REVIEW_MAX_TOKENS) { run.held++; break; }
+          const reserveBrief = run.actor !== "schedule:review-backlog" && !this.store.briefing(easternDay(this.now()));
+          if (!this.reviewCapacity(usage, reserveBrief)) { run.held++; break; }
           const context = await this.jobs.reviewContext(item.id, signal);
           const result = await this.model(run, context, REVIEW_MAX_TOKENS, () => this.provider.review(context, signal));
           const proposal = reviewSchema.parse(result.value);

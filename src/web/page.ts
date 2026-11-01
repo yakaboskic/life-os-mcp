@@ -1055,7 +1055,9 @@ export const PORTAL_HTML = `<!doctype html>
     }).format(new Date(iso));
   };
   const jobStatus = (status) => String(status || "unknown").replaceAll("_", " ");
-  const successful = (run) => ["completed", "succeeded", "success"].includes(run.status) && run.mode !== "dry-run";
+  const successful = (run) => run.scheduled && run.mode === "apply" && run.finishedAt &&
+    ["completed", "succeeded", "success", "partial"].includes(run.status) && run.accounts?.length > 0 &&
+    run.accounts.every((account) => ["success", "partial"].includes(account.status) && account.failed === 0);
   const count = (n) => Number.isFinite(n) && n >= 0 ? n : 0;
   const jobBadge = (status) => {
     const tone = ["completed", "succeeded", "success", "ready", "sent"].includes(status) ? "good"
@@ -1077,7 +1079,7 @@ export const PORTAL_HTML = `<!doctype html>
     if (!jobs) return;
     const runs = Array.isArray(jobs.runs) ? jobs.runs : [];
     const latest = runs[0];
-    const lastSuccess = runs.find(successful);
+    const lastSuccess = Object.hasOwn(jobs, "lastSuccessfulRun") ? jobs.lastSuccessfulRun : runs.find(successful);
     const reviews = count(jobs.reviewCount);
     $("last-job").textContent = lastSuccess ? jobTime(lastSuccess.finishedAt || lastSuccess.startedAt) : "No successful run yet";
     $("next-job").textContent = jobs.schedule?.nextRunAt ? jobTime(jobs.schedule.nextRunAt) : "Schedule not active";
@@ -1094,8 +1096,8 @@ export const PORTAL_HTML = `<!doctype html>
       (latest ? jobBadge(latest.status) : "<span class='job-state'>Awaiting first run</span>") + "</div>" +
       "<dl class='job-summary'><div><dt>Latest run</dt><dd>" + (latest ? jobTime(latest.startedAt) : "No run recorded") + "</dd></div>" +
       "<div><dt>Mode</dt><dd>" + (latest ? esc(latest.mode || "Unknown") : "—") + "</dd></div>" +
-      "<div><dt>Jev decisions to review</dt><dd>" + reviews + "</dd></div></dl>" + accountsTable +
-      (reviews ? "<p class='mutetext' style='font-size:12px; margin-top:14px'>Held messages remain in your inbox. Review them with your connected agent or the LifeOS CLI.</p>" : "") +
+      "<div><dt>Held conversations</dt><dd>" + reviews + "</dd></div></dl>" + accountsTable +
+      (reviews ? "<p class='mutetext' style='font-size:12px; margin-top:14px'>Held messages remain in your inbox. Claude reviews eligible conversations; uncertain decisions remain available below for your review.</p>" : "") +
       (runs.length ? "<details class='job-history'><summary>Run history · " + runs.length + "</summary><div class='tablewrap'><table><thead><tr><th>Started</th><th>Mode</th><th>Status</th><th>Finished</th></tr></thead><tbody>" +
         runs.map((r) => "<tr><td>" + jobTime(r.startedAt) + "</td><td>" + esc(r.mode || "Unknown") + "</td><td>" + jobBadge(r.status) + "</td><td>" +
           (r.finishedAt ? jobTime(r.finishedAt) : "—") + "</td></tr>").join("") + "</tbody></table></div></details>" : "");
@@ -1528,7 +1530,11 @@ export const PORTAL_HTML = `<!doctype html>
       (latest ? '<p class="automation-detail">' + count(latest.reviewed) + ' reviewed · ' + count(latest.applied) + ' applied · ' + count(latest.held) + ' held for you · ' + count(latest.failed) + ' failed' + (latest.nextAttemptAt ? ' · next attempt ' + jobTime(latest.nextAttemptAt) : '') + (latest.errorCode ? ' · ' + esc(actionErrorMessage(latest.errorCode)) : '') + '</p>' : '') +
       (runs.length ? '<details class="job-history"' + (historyOpen ? ' open' : '') + '><summary>Workflow history · ' + runs.length + '</summary><div class="automation-history">' + runs.slice(0, 12).map((run) => '<div class="automation-history-row"><span>' + esc(run.kind) + '<small>' + jobTime(run.startedAt || run.createdAt) + '</small></span>' + jobBadge(run.state) + '<span>' + count(run.applied) + ' applied · ' + count(run.held) + ' held</span></div>').join('') + '</div></details>' : '') + decisionHistory(automation.recentDecisions, decisionsOpen);
     const reviews = (automation.reviews || []).filter((item) => !item.resolvedAt);
-    $("review-queue").innerHTML = '<div class="portfolio-heading"><div><h2>Decisions for you</h2><p class="mutetext">Held messages stay in your inbox until a category is resolved.</p></div><span class="chip">' + reviews.length + ' pending</span></div>' +
+    const backlog = automation.backlog;
+    const total = backlog ? count(backlog.total) : reviews.length;
+    $("review-queue").innerHTML = '<div class="portfolio-heading"><div><h2>Held conversations</h2><p class="mutetext">Held messages stay in your inbox until a category is resolved.</p></div><span class="chip">' + total + ' held</span></div>' +
+      (backlog ? '<p class="automation-detail">' + count(backlog.awaitingAgent) + ' awaiting Claude review · ' + count(backlog.needsDecision) + ' need your decision · ' + count(backlog.needsContext) + ' need more context</p>' : '') +
+      (total > reviews.length ? '<p class="mutetext">Showing ' + reviews.length + ' of ' + total + ' held conversations.</p>' : '') +
       (reviews.length ? '<div class="review-list panel">' + reviews.map((item) => '<article class="review-row"><div><h3>' + esc(item.subject || '(No subject)') + '</h3><p>' + esc(item.sender) + ' · ' + esc(item.account) + '</p><p class="review-reason">' + esc(jobStatus(item.reason)) + (item.category ? ' · suggested ' + esc(item.category) : '') + '</p></div><button class="quiet-button" type="button" data-write-control data-review-item="' + esc(item.id) + '"' + (item.reviewable === false ? ' data-review-unavailable' : '') + '>' + (item.reviewable === false ? 'Not actionable' : 'Review classification') + '</button></article>').join('') + '</div>' : '<p class="mutetext">No decisions are waiting for your review.</p>');
     refreshActionControls();
   }

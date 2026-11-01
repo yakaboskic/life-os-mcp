@@ -1,10 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { claudeArguments, claudeEnvironment, createClaudeRunner, parseClaudeResult, runClaude } from "../../src/runtime/claude-runner.js";
-import { DEFAULT_CLAUDE_MODEL } from "../../src/automation/provider.js";
+import { DEFAULT_CLAUDE_MODEL, briefJsonSchema, reviewJsonSchema } from "../../src/automation/provider.js";
 
 const brief={title:"Today",summary:"Two tasks need attention.",priorities:[],notes:[]};
 const envelope={subtype:"success",is_error:false,structured_output:brief,usage:{input_tokens:120,output_tokens:30,cache_read_input_tokens:20,cache_creation_input_tokens:10}};
@@ -15,9 +15,37 @@ describe("isolated Claude Code runner",()=>{
     expect(args[args.indexOf("--tools")+1]).toBe("");
     expect(args[args.indexOf("--mcp-config")+1]).toBe('{"mcpServers":{}}');
     expect(args).toContain("--strict-mcp-config");expect(args).toContain("--no-session-persistence");
+    expect(JSON.parse(args[args.indexOf("--json-schema")+1]!)).toEqual(briefJsonSchema);
+    const reviewArgs=claudeArguments("review",DEFAULT_CLAUDE_MODEL);
+    expect(JSON.parse(reviewArgs[reviewArgs.indexOf("--json-schema")+1]!)).toEqual(reviewJsonSchema);
     const env=claudeEnvironment("/private/runner");
     expect(env.ANTHROPIC_API_KEY).toBeUndefined();expect(env.LIFE_OS_INTERACTIVE_TOKEN).toBeUndefined();
     expect(env.SSH_AUTH_SOCK).toBeUndefined();expect(env.CLAUDE_CONFIG_DIR).toBe("/private/runner/.claude");
+  });
+  it("identifies missing, oversized and exhausted structured output without retaining its contents",()=>{
+    for(const [structured_output,issues] of [
+      [undefined,[{path:"$",code:"invalid_type"}]],
+      [{...brief,summary:"private text".repeat(110)},[{path:"$.summary",code:"too_big"}]],
+      [{...brief,notes:[""]},[{path:"$.notes[0]",code:"too_small"}]]
+    ] as const) {
+      let error:unknown;
+      try{parseClaudeResult(JSON.stringify({...envelope,structured_output}),"brief",DEFAULT_CLAUDE_MODEL);}catch(caught){error=caught;}
+      expect(error).toMatchObject({message:"CLAUDE_INVALID_STRUCTURED_OUTPUT",issues});
+      expect(JSON.stringify(error)).not.toContain("private text");
+    }
+    expect(()=>parseClaudeResult(JSON.stringify({subtype:"error_max_structured_output_retries",is_error:true,errors:["private detail"]}),"brief",DEFAULT_CLAUDE_MODEL)).toThrow("CLAUDE_INVALID_STRUCTURED_OUTPUT");
+  });
+  it("logs sanitized schema diagnostics while keeping the HTTP error contract private",async()=>{
+    const log=vi.spyOn(console,"error").mockImplementation(()=>{});
+    const server=createClaudeRunner({home:"/tmp",binary:"/tmp/unused",run:async()=>parseClaudeResult(JSON.stringify({...envelope,structured_output:{...brief,notes:[""],"private subject":"private body"}}),"brief",DEFAULT_CLAUDE_MODEL)});
+    await new Promise<void>(r=>server.listen(0,"127.0.0.1",r));
+    try {
+      const res=await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/run`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({kind:"brief",model:DEFAULT_CLAUDE_MODEL,input:{private:"private source"}})});
+      expect(res.status).toBe(503);expect(await res.json()).toEqual({error:"CLAUDE_INVALID_STRUCTURED_OUTPUT"});
+      expect(log).toHaveBeenCalledOnce();
+      expect(JSON.parse(log.mock.calls[0]![1])).toEqual({kind:"brief",issues:[{path:"$.notes[0]",code:"too_small"},{path:"$",code:"unrecognized_keys"}]});
+      expect(JSON.stringify(log.mock.calls)).not.toContain("private");
+    } finally {server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));log.mockRestore();}
   });
   it("validates structured output and accounts for cached subscription tokens",()=>{
     expect(parseClaudeResult(JSON.stringify(envelope),"brief",DEFAULT_CLAUDE_MODEL)).toMatchObject({value:brief,inputTokens:150,outputTokens:30});

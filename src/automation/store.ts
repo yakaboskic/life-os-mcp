@@ -5,12 +5,28 @@ import type { AutomationKind, AutomationRun, AutomationSchedule, AutomationRevie
 
 export interface ReviewRecord extends AutomationReviewDecision { revision: string; policyVersion: string }
 export interface StoredRun extends AutomationRun { approvedIds?: string[] }
-export const LIMITS = { maxCalls: 24, maxInputTokens: 500_000, maxOutputTokens: 40_000 };
+export interface AutomationLimits { maxCalls: number; maxInputTokens: number; maxOutputTokens: number; maxReviewCalls: number }
+export const LIMITS: AutomationLimits = { maxCalls: 24, maxInputTokens: 500_000, maxOutputTokens: 40_000, maxReviewCalls: 20 };
+export function automationLimits(env: Record<string, string | undefined>): AutomationLimits {
+  const value = (name: string, fallback: number, maximum: number) => {
+    if (env[name] === undefined) return fallback;
+    if (!/^[1-9]\d*$/.test(env[name]!)) throw new Error("AUTOMATION_LIMIT_INVALID");
+    const parsed = Number(env[name]);
+    if (!Number.isSafeInteger(parsed) || parsed > maximum) throw new Error("AUTOMATION_LIMIT_INVALID");
+    return parsed;
+  };
+  return {
+    maxCalls: value("LIFE_OS_AUTOMATION_MAX_CALLS", LIMITS.maxCalls, 101),
+    maxInputTokens: value("LIFE_OS_AUTOMATION_MAX_INPUT_TOKENS", LIMITS.maxInputTokens, 1_000_000),
+    maxOutputTokens: value("LIFE_OS_AUTOMATION_MAX_OUTPUT_TOKENS", LIMITS.maxOutputTokens, 100_000),
+    maxReviewCalls: value("LIFE_OS_REVIEW_MAX_PER_DAY", LIMITS.maxReviewCalls, 100),
+  };
+}
 export function digest(value: unknown): string { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
 const decode = <T>(row: unknown): T | undefined => row ? JSON.parse((row as { json: string }).json) as T : undefined;
 
 export class AutomationStore {
-  constructor(readonly db: DatabaseSync) {
+  constructor(readonly db: DatabaseSync, private readonly limits: AutomationLimits = LIMITS) {
     db.exec(`
       CREATE TABLE IF NOT EXISTS automation_settings (id INTEGER PRIMARY KEY CHECK(id=1), json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS automation_runs (id TEXT PRIMARY KEY, run_key TEXT UNIQUE NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, json TEXT NOT NULL);
@@ -20,8 +36,13 @@ export class AutomationStore {
       CREATE TABLE IF NOT EXISTS automation_briefings (id TEXT PRIMARY KEY, day TEXT UNIQUE NOT NULL, created_at TEXT NOT NULL, json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS automation_outbox (id TEXT PRIMARY KEY, delivery_key TEXT UNIQUE NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, json TEXT NOT NULL, raw TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS automation_usage (day TEXT PRIMARY KEY, calls INTEGER NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS automation_review_usage (day TEXT PRIMARY KEY, calls INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS owned_generated_messages (account TEXT NOT NULL, rfc_message_id TEXT NOT NULL, gmail_message_id TEXT, PRIMARY KEY(account,rfc_message_id));
     `);
+    // Older releases did not distinguish failed/aborted review calls from brief calls.
+    // Count every legacy call conservatively rather than grant extra quota on upgrade.
+    db.exec(`INSERT OR IGNORE INTO automation_review_usage(day,calls)
+      SELECT day,calls FROM automation_usage`);
   }
   recover(now: string): void {
     for (const run of this.runs(1000).filter(item => item.state === "running")) { run.state = "queued"; run.errorCode = "DAEMON_RESTARTED"; delete run.claim; this.saveRun(run); }
@@ -43,6 +64,7 @@ export class AutomationStore {
     this.db.prepare("INSERT INTO automation_runs VALUES(?,?,?,?,?)").run(run.id, key, run.state, now, JSON.stringify(run)); return run;
   }
   runs(limit = 30): StoredRun[] { return this.db.prepare("SELECT json FROM automation_runs ORDER BY created_at DESC,rowid DESC LIMIT ?").all(limit).map(row => decode<StoredRun>(row)!); }
+  runsForDay(day: string): StoredRun[] { return this.db.prepare("SELECT json FROM automation_runs WHERE json_extract(json,'$.day')=? ORDER BY created_at DESC,rowid DESC").all(day).map(row => decode<StoredRun>(row)!); }
   saveRun(run: StoredRun): void { this.db.prepare("UPDATE automation_runs SET state=?,json=? WHERE id=?").run(run.state, JSON.stringify(run), run.id); }
   claim(now: string): StoredRun | undefined {
     return transaction(this.db, () => {
@@ -72,12 +94,14 @@ export class AutomationStore {
     this.db.prepare("UPDATE automation_outbox SET state=?,json=? WHERE id=?").run(entry.state, JSON.stringify(entry), entry.id);
     if (entry.gmailMessageId) this.db.prepare("UPDATE owned_generated_messages SET gmail_message_id=? WHERE account=? AND rfc_message_id=?").run(entry.gmailMessageId, entry.account, entry.messageId);
   }); }
-  usage(day: string) { const row = this.db.prepare("SELECT * FROM automation_usage WHERE day=?").get(day); return { day, calls: Number(row?.calls ?? 0), inputTokens: Number(row?.input_tokens ?? 0), outputTokens: Number(row?.output_tokens ?? 0), ...LIMITS }; }
-  reserve(day: string, input: number, output: number): void {
+  usage(day: string) { const row = this.db.prepare("SELECT * FROM automation_usage WHERE day=?").get(day), reviews = this.db.prepare("SELECT calls FROM automation_review_usage WHERE day=?").get(day); return { day, calls: Number(row?.calls ?? 0), inputTokens: Number(row?.input_tokens ?? 0), outputTokens: Number(row?.output_tokens ?? 0), reviewCalls: Number(reviews?.calls ?? 0), ...this.limits }; }
+  reserve(day: string, input: number, output: number, kind?: "review" | "brief"): void {
     transaction(this.db, () => {
       const usage = this.usage(day);
-      if (usage.calls >= LIMITS.maxCalls || usage.inputTokens + input > LIMITS.maxInputTokens || usage.outputTokens + output > LIMITS.maxOutputTokens) throw new Error("DAILY_MODEL_BUDGET_EXHAUSTED");
+      if (usage.calls >= this.limits.maxCalls || usage.inputTokens + input > this.limits.maxInputTokens || usage.outputTokens + output > this.limits.maxOutputTokens || kind === "review" && usage.reviewCalls >= this.limits.maxReviewCalls) throw new Error("DAILY_MODEL_BUDGET_EXHAUSTED");
+      this.db.prepare("INSERT OR IGNORE INTO automation_review_usage VALUES(?,0)").run(day);
       this.db.prepare("INSERT INTO automation_usage VALUES(?,?,?,?) ON CONFLICT(day) DO UPDATE SET calls=excluded.calls,input_tokens=excluded.input_tokens,output_tokens=excluded.output_tokens").run(day, usage.calls + 1, usage.inputTokens + input, usage.outputTokens + output);
+      if (kind === "review") this.db.prepare("INSERT INTO automation_review_usage VALUES(?,?) ON CONFLICT(day) DO UPDATE SET calls=excluded.calls").run(day, usage.reviewCalls + 1);
     });
   }
   settle(day: string, reservedInput: number, reservedOutput: number, input: number, output: number): void {

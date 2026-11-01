@@ -19,7 +19,8 @@ export interface BriefDelivery {
 export interface AutomationSnapshot {
   configured: boolean; model: string; paused: boolean; activeCount: number; reviews: ReviewItem[]; runs: AutomationRun[];
   schedule: AutomationSchedule; briefing: BriefingArtifact | null; deliveries: BriefDelivery[];
-  usage: { day: string; calls: number; inputTokens: number; outputTokens: number; maxCalls: number; maxInputTokens: number; maxOutputTokens: number };
+  usage: { day: string; calls: number; inputTokens: number; outputTokens: number; maxCalls: number; maxInputTokens: number; maxOutputTokens: number; reviewCalls?: number; maxReviewCalls?: number };
+  backlog?: { total: number; awaitingAgent: number; needsDecision: number; needsContext: number };
   recentDecisions?: AutomationReviewDecision[];
 }
 export interface AutomationReviewDecision { id: string; account: string; category: string | null; state: "held" | "accepted" | "applied"; model: string; reason: string; createdAt: string }

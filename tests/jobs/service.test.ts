@@ -55,6 +55,26 @@ function fixture(classifier?: Classifier) {
 afterEach(() => { for (const config of folders.splice(0)) { closeDatabase(config); rmSync(config.home, { recursive: true, force: true }); } });
 
 describe("Gmail durable jobs", () => {
+  it("counts only live configured holds and recognizes a clean scheduled run with held mail", async () => {
+    const f = fixture({ classify: async () => decision("NEWSLETTER", 0.4) }); f.mail.add("thread1");
+    await f.service.start({ mode: "dry-run", scheduled: true });
+    expect(f.service.status()).toMatchObject({ reviewCount: 0, lastSuccessfulRun: null });
+    const applied = await f.service.start({ mode: "apply", scheduled: true });
+    expect(applied.state).toBe("partial");
+    expect(f.service.status()).toMatchObject({ reviewCount: 1, lastSuccessfulRun: { id: applied.id } });
+    f.mail.accountList = ["another@example.com"];
+    expect(f.service.status()).toMatchObject({ reviewCount: 0, lastSuccessfulRun: null });
+  });
+  it("does not report failed scheduled classification or a manual review as scheduled success", async () => {
+    let fail = true;
+    const f = fixture({ classify: async () => { if (fail) throw Error("JEV_INVALID_RESPONSE"); return decision(); } }); f.mail.add("thread1");
+    const failed = await f.service.start({ mode: "apply", scheduled: true });
+    expect(failed.accounts[0]?.failed).toBe(1);
+    expect(f.service.status().lastSuccessfulRun).toBeNull();
+    fail = false;
+    await f.service.start({ mode: "apply" });
+    expect(f.service.status().lastSuccessfulRun).toBeNull();
+  });
   it("dry runs never create labels, mutate Gmail, or create local tasks; apply has a separate journal", async () => {
     const f = fixture(); f.mail.add("thread1");
     expect((await f.service.start({ mode: "dry-run", scheduled: true })).state).toBe("success");
